@@ -15,12 +15,19 @@ from execution_cost.portfolio import (
     run_cost_slice,
     synthetic_signal_backtest,
 )
+from execution_cost.sensitivity import (
+    CurvePoint,
+    curve_drag_rises_with_turnover,
+    turnover_cost_curve,
+)
 
 __all__ = [
     "CostParams",
+    "CurvePoint",
     "PortfolioResult",
     "annualized_sharpe",
     "apply_costs_to_returns",
+    "curve_drag_rises_with_turnover",
     "half_spread_cost",
     "linear_slippage_cost",
     "mean_turnover",
@@ -29,6 +36,7 @@ __all__ = [
     "square_root_impact_cost",
     "synthetic_signal_backtest",
     "total_unit_cost",
+    "turnover_cost_curve",
 ]
 
 __version__ = "0.1.0"
