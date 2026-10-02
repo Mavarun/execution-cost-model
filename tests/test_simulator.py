@@ -96,3 +96,14 @@ def test_ac_mapping_matches_sqrt_law_at_twap_rate():
         POV(1.5)
     with pytest.raises(ValueError):
         execute(twap_schedule(10, 26), simulate_market(MP, 2, 0), MP, 10, side=0)
+
+
+def test_per_path_targets_for_metaorders():
+    mk = simulate_market(MP, n_paths=4, seed=5)
+    Q = np.array([1_000.0, 10_000.0, 50_000.0, 100_000.0])
+    res = execute(Q[:, None] / 26 * np.ones((1, 26)), mk, MP, Q)
+    np.testing.assert_allclose(res.executed, Q)
+    # bigger orders pay more temporary impact per share
+    assert np.all(np.diff(res.temp_impact.mean(1)) > 0)
+    with pytest.raises(ValueError):
+        execute(twap_schedule(10, 26), mk, MP, np.ones(3))

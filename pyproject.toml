@@ -12,6 +12,8 @@ authors = [{ name = "M.Varun", email = "116015799+Mavarun@users.noreply.github.c
 dependencies = [
     "numpy",
     "pandas",
+    "scipy",
+    "statsmodels",
     "pytest",
 ]
 
