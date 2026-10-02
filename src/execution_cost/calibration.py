@@ -154,7 +154,8 @@ class CalibrationResult:
     nls_delta_se: float
     binned_delta: float
     binned_delta_ci: tuple
-    sqrt_Y: float  # Y with delta fixed at 0.5 (used for scheduling)
+    sqrt_Y: float  # Y with delta fixed at 0.5 on raw slippage
+    temp_sqrt_Y: float  # same, after netting out the estimated permanent part
     perm_coeff: float
     perm_ci: tuple
     oos_mse_power: float
@@ -176,6 +177,7 @@ def calibrate_impact(
     train_frac: float = 0.7,
     seed: int = 0,
     n_bins: int = 10,
+    market: MarketParams | None = None,
 ) -> CalibrationResult:
     """Fit the impact law on a train split and score it out of sample."""
     m = orders or generate_metaorders(seed=seed)
@@ -189,6 +191,12 @@ def calibrate_impact(
     y_sqrt = fit_fixed_exponent(m.q[tr], m.y[tr], 0.5)
     y_lin = fit_fixed_exponent(m.q[tr], m.y[tr], 1.0)
     permfit = fit_permanent(m.q[tr], m.perm_move[tr])
+    # A TWAP's average fill already contains its own permanent impact,
+    # ~perm * q * (N - 1) / (2 N) in sigma units. Net that out so a cost
+    # model that adds permanent impact separately does not double count.
+    n_int = (market or MarketParams()).n_intervals
+    perm_share = permfit["perm_coeff"] * m.q[tr] * (n_int - 1) / (2 * n_int)
+    y_temp = fit_fixed_exponent(m.q[tr], m.y[tr] - perm_share, 0.5)
 
     preds = {
         "power": _power(m.q[te], nls["Y"], nls["delta"]),
@@ -210,6 +218,7 @@ def calibrate_impact(
         binned_delta=binned["delta"],
         binned_delta_ci=binned["delta_ci"],
         sqrt_Y=y_sqrt,
+        temp_sqrt_Y=y_temp,
         perm_coeff=permfit["perm_coeff"],
         perm_ci=permfit["perm_ci"],
         oos_mse_power=mse["power"],

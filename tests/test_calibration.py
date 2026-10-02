@@ -49,6 +49,9 @@ def test_calibration_recovers_square_root_exponent_and_rejects_linear():
     # sqrt-coefficient ~ temporary TWAP coefficient + small permanent spill-over
     eff = twap_effective_sqrt_coefficient()
     assert eff - 0.03 < r.sqrt_Y < eff + 0.08
+    # netting out the estimated permanent share lands near the temporary-only value
+    assert abs(r.temp_sqrt_Y - eff) < 0.04
+    assert r.temp_sqrt_Y < r.sqrt_Y
     # permanent impact is noisy but its CI covers the true 0.25
     assert r.perm_ci[0] < 0.25 < r.perm_ci[1]
 
