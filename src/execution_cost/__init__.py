@@ -1,5 +1,7 @@
 """Execution cost model: spread, slippage, square-root impact, net vs gross Sharpe."""
 
+from execution_cost.almgren_chriss import ACParams, ac_trade_list, ac_trajectory
+from execution_cost.calibration import calibrate_impact, generate_metaorders
 from execution_cost.costs import (
     CostParams,
     half_spread_cost,
@@ -15,6 +17,8 @@ from execution_cost.portfolio import (
     run_cost_slice,
     synthetic_signal_backtest,
 )
+from execution_cost.shortfall import decompose_shortfall, perold_shortfall
+from execution_cost.simulator import POV, MarketParams, execute, simulate_market
 from execution_cost.sensitivity import (
     CurvePoint,
     curve_drag_rises_with_turnover,
@@ -22,6 +26,17 @@ from execution_cost.sensitivity import (
 )
 
 __all__ = [
+    "ACParams",
+    "MarketParams",
+    "POV",
+    "ac_trade_list",
+    "ac_trajectory",
+    "calibrate_impact",
+    "decompose_shortfall",
+    "execute",
+    "generate_metaorders",
+    "perold_shortfall",
+    "simulate_market",
     "CostParams",
     "CurvePoint",
     "PortfolioResult",

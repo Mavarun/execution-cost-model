@@ -104,7 +104,7 @@ class POV:
 @dataclass
 class ExecutionResult:
     side: int
-    target: float
+    target: float | np.ndarray  # scalar or (P,) per-path order size
     trades: np.ndarray  # (P, N) shares (>= 0)
     fill_prices: np.ndarray  # (P, N)
     mids: np.ndarray  # (P, N) mid just before each interval's trading
@@ -146,14 +146,16 @@ def execute(
     schedule: np.ndarray | POV,
     market: MarketPaths,
     params: MarketParams,
-    target: float,
+    target: float | np.ndarray,
     side: int = 1,
 ) -> ExecutionResult:
     """Run a schedule against every simulated day.
 
     ``schedule`` is a static trade list of length ``N`` (or ``(P, N)``) that
     should sum to ``target``, or a :class:`POV` instance. Static trades are
-    capped so cumulative shares never exceed ``target``.
+    capped so cumulative shares never exceed ``target``. ``target`` may be a
+    ``(P,)`` array to give every simulated day its own order size (used for
+    metaorder calibration).
     """
     if side not in (1, -1):
         raise ValueError("side must be +1 (buy) or -1 (sell)")
@@ -164,7 +166,10 @@ def execute(
     permb = np.zeros((P, N))
     noiseb = np.zeros((P, N))
     temps = np.zeros((P, N))
-    remaining = np.full(P, float(target))
+    tgt = np.asarray(target, dtype=float)
+    if tgt.ndim not in (0, 1) or (tgt.ndim == 1 and tgt.shape != (P,)):
+        raise ValueError("target must be a scalar or have shape (n_paths,)")
+    remaining = np.broadcast_to(tgt, (P,)).astype(float).copy()
     perm = np.zeros(P)
     noise = np.zeros(P)
     static = None
@@ -192,7 +197,7 @@ def execute(
         noise = noise + market.noise_increments[:, j]
     return ExecutionResult(
         side=side,
-        target=float(target),
+        target=float(tgt) if tgt.ndim == 0 else tgt.copy(),
         trades=trades,
         fill_prices=fills,
         mids=mids,

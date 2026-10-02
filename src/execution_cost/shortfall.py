@@ -111,7 +111,7 @@ def decompose_shortfall(
     to_bps = 1e4 / notional
     unexec = res.unexecuted
 
-    delay = np.full(n.shape[0], s * res.target * (a - d))
+    delay = np.broadcast_to(s * np.asarray(res.target) * (a - d), (n.shape[0],)).astype(float)
     spread = n.sum(1) * res.half_spread
     temporary = (n * res.temp_impact).sum(1)
     permanent = s * (n * res.perm_before).sum(1)
