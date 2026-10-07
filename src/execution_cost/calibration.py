@@ -172,6 +172,37 @@ class CalibrationResult:
         return d
 
 
+def train_test_split(n: int, train_frac: float = 0.7, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """Seeded order-level split used by every calibration fit."""
+    perm = np.random.default_rng(seed + 7).permutation(n)
+    cut = int(train_frac * n)
+    return perm[:cut], perm[cut:]
+
+
+def _temp_only_coeff(m: Metaorders, tr: np.ndarray, delta: float, perm_coeff: float, market) -> float:
+    n_int = (market or MarketParams()).n_intervals
+    perm_share = perm_coeff * m.q[tr] * (n_int - 1) / (2 * n_int)
+    return fit_fixed_exponent(m.q[tr], m.y[tr] - perm_share, delta)
+
+
+def temp_coeff_at_exponent(
+    orders: Metaorders,
+    delta: float,
+    perm_coeff: float,
+    train_frac: float = 0.7,
+    seed: int = 0,
+    market: MarketParams | None = None,
+) -> float:
+    """Temporary-impact coefficient for ``y = Y q^delta`` on the train split.
+
+    Same split and permanent-impact netting as ``temp_sqrt_Y`` in
+    :func:`calibrate_impact`, so ``temp_coeff_at_exponent(m, 0.5, ...)``
+    equals it exactly; used to plan with an estimated (non-sqrt) exponent.
+    """
+    tr, _ = train_test_split(len(orders.q), train_frac, seed)
+    return _temp_only_coeff(orders, tr, float(delta), perm_coeff, market)
+
+
 def calibrate_impact(
     orders: Metaorders | None = None,
     train_frac: float = 0.7,
@@ -181,10 +212,7 @@ def calibrate_impact(
 ) -> CalibrationResult:
     """Fit the impact law on a train split and score it out of sample."""
     m = orders or generate_metaorders(seed=seed)
-    rng = np.random.default_rng(seed + 7)
-    perm = rng.permutation(len(m.q))
-    cut = int(train_frac * len(perm))
-    tr, te = perm[:cut], perm[cut:]
+    tr, te = train_test_split(len(m.q), train_frac, seed)
 
     nls = fit_power_law_nls(m.q[tr], m.y[tr])
     binned = fit_binned_loglog(m.q[tr], m.y[tr], n_bins)
@@ -194,9 +222,7 @@ def calibrate_impact(
     # A TWAP's average fill already contains its own permanent impact,
     # ~perm * q * (N - 1) / (2 N) in sigma units. Net that out so a cost
     # model that adds permanent impact separately does not double count.
-    n_int = (market or MarketParams()).n_intervals
-    perm_share = permfit["perm_coeff"] * m.q[tr] * (n_int - 1) / (2 * n_int)
-    y_temp = fit_fixed_exponent(m.q[tr], m.y[tr] - perm_share, 0.5)
+    y_temp = _temp_only_coeff(m, tr, 0.5, permfit["perm_coeff"], market)
 
     preds = {
         "power": _power(m.q[te], nls["Y"], nls["delta"]),

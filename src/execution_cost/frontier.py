@@ -76,11 +76,16 @@ def match_std_lam(
     hi: float = 1e-2,
     iters: int = 60,
     fee_bps: float = 0.0,
+    planner_exponent: float = 0.5,
 ) -> tuple[float, np.ndarray]:
-    """Bisect ``lam`` (log scale) so the sqrt optimum's realised std hits the target."""
+    """Bisect ``lam`` (log scale) so the sqrt optimum's realised std hits the target.
+
+    ``mp`` is the true market used for evaluation; the planner always uses
+    ``planner_exponent`` (0.5 = the sqrt law), never ``mp.temp_exponent``.
+    """
 
     def std_at(lam):
-        tot = _evaluate(sqrt_schedule(mp, X, lam, Y, G), mk, mp, X, fee_bps)
+        tot = _evaluate(sqrt_schedule(mp, X, lam, Y, G, temp_exponent=planner_exponent), mk, mp, X, fee_bps)
         return float(tot.std(ddof=1)), tot
 
     s_lo, _ = std_at(lo)
@@ -123,7 +128,7 @@ def realised_frontiers(
         lam_m, sq_tot = match_std_lam(ac_std, mp, X, mk, Y, G, fee_bps=fee_bps)
         matched = abs(float(sq_tot.std(ddof=1)) - ac_std) < 1e-6 * ac_std
         diff = ac_tot - sq_tot
-        same = _evaluate(sqrt_schedule(mp, X, lam, Y, G), mk, mp, X, fee_bps)
+        same = _evaluate(sqrt_schedule(mp, X, lam, Y, G, temp_exponent=0.5), mk, mp, X, fee_bps)
         out.append(
             FrontierPoint(
                 kappa_T=float(k),
