@@ -107,3 +107,40 @@ def test_per_path_targets_for_metaorders():
     assert np.all(np.diff(res.temp_impact.mean(1)) > 0)
     with pytest.raises(ValueError):
         execute(twap_schedule(10, 26), mk, MP, np.ones(3))
+
+
+# --- lagged (implementable) POV -------------------------------------------------
+
+def test_lagged_pov_uses_previous_interval_volume_rescaled_by_profile():
+    from execution_cost.simulator import POV, MarketParams, execute, simulate_market
+
+    mp = MarketParams()
+    mk = simulate_market(mp, 50, seed=3)
+    target = 1e9  # never binding: trades are pure POV
+    res = execute(POV(0.05, lag=1), mk, mp, target)
+    np.testing.assert_allclose(res.trades[:, 0], 0.05 * mp.adv * mk.profile[0])
+    expect = 0.05 * mk.volumes[:, :-1] * mk.profile[1:] / mk.profile[:-1]
+    np.testing.assert_allclose(res.trades[:, 1:], expect)
+    ideal = execute(POV(0.05), mk, mp, target)
+    np.testing.assert_allclose(ideal.trades, 0.05 * mk.volumes)
+
+
+def test_lagged_pov_participation_is_noisy_around_the_rate():
+    from execution_cost.simulator import POV, MarketParams, execute, simulate_market
+
+    mp = MarketParams()
+    mk = simulate_market(mp, 2000, seed=4)
+    part = execute(POV(0.05, lag=1), mk, mp, 1e9).trades / mk.volumes
+    ideal = execute(POV(0.05), mk, mp, 1e9).trades / mk.volumes
+    np.testing.assert_allclose(ideal, 0.05)
+    assert part.std() > 0.01  # interval volume noise 0.3 -> forecast errors
+    assert abs(np.median(part[:, 1:]) - 0.05) < 0.01
+
+
+def test_pov_lag_validation():
+    import pytest
+
+    from execution_cost.simulator import POV
+
+    with pytest.raises(ValueError):
+        POV(0.05, lag=2)

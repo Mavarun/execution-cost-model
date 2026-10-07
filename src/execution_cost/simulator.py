@@ -92,13 +92,33 @@ def simulate_market(params: MarketParams, n_paths: int, seed: int = 0) -> Market
 
 @dataclass
 class POV:
-    """Percentage-of-volume: trade ``rate`` x realised interval volume."""
+    """Percentage-of-volume: trade ``rate`` x interval volume.
+
+    ``lag=0`` is the idealised slice-2 POV: it sees the *current* interval's
+    realised volume before trading in it. ``lag=1`` is implementable: it
+    targets ``rate`` x a forecast of the current interval's volume made from
+    the previous interval's realised volume, rescaled by the expected
+    profile (``V_{j-1} u_j / u_{j-1}``; the first interval uses its
+    pre-trade expectation ``ADV u_0``). The realised participation, and so
+    the impact, is then ``rate x forecast / V_j``.
+    """
 
     rate: float
+    lag: int = 0
 
     def __post_init__(self):
         if not 0.0 < self.rate < 1.0:
             raise ValueError("POV rate must be in (0, 1)")
+        if self.lag not in (0, 1):
+            raise ValueError("POV lag must be 0 (idealised) or 1 (previous interval)")
+
+    def volume_signal(self, market: "MarketPaths", params: "MarketParams", j: int) -> np.ndarray:
+        """Volume the POV order sizes interval ``j`` on (shape ``(P,)``)."""
+        if self.lag == 0:
+            return market.volumes[:, j]
+        if j == 0:
+            return np.full(market.n_paths, params.adv * market.profile[0])
+        return market.volumes[:, j - 1] * market.profile[j] / market.profile[j - 1]
 
 
 @dataclass
@@ -182,7 +202,7 @@ def execute(
         if static is not None:
             n = np.minimum(static[:, j], remaining)
         else:
-            n = np.minimum(schedule.rate * vol, remaining)
+            n = np.minimum(schedule.rate * schedule.volume_signal(market, params, j), remaining)
         n = np.maximum(n, 0.0)
         mid = params.s0 + noise + perm
         temp = temporary_impact(n / vol, params)
