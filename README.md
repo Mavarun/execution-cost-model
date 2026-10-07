@@ -47,6 +47,7 @@ python scripts/run_cost_slice.py
 python scripts/run_cost_slice.py --json --out artifacts/cost_slice.json
 python scripts/run_execution_comparison.py          # calibration + schedule comparison tables
 python scripts/run_execution_comparison.py --json --out artifacts/execution.json
+python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-2/3 tables only (fast)
 ```
 
 ## Layout
@@ -61,6 +62,9 @@ python scripts/run_execution_comparison.py --json --out artifacts/execution.json
 - `src/execution_cost/shortfall.py` - implementation shortfall decomposition
 - `src/execution_cost/calibration.py` - sqrt impact calibration on metaorders
 - `src/execution_cost/comparison.py` - calibrated, out-of-sample schedule comparison
+- `src/execution_cost/optimal_sqrt.py` - profile-aware mean-variance optimum under the sqrt law (SLSQP)
+- `src/execution_cost/frontier.py` - SQRT-OPT vs AC at equal realised risk
+- `src/execution_cost/misspecification.py` - true impact exponent != 0.5
 - `scripts/run_cost_slice.py` - CLI for baseline + cost curve
 - `scripts/run_execution_comparison.py` - CLI for the execution slice
 - `.github/workflows/tests.yml` - pytest CI (py3.11 / 3.12)
@@ -116,10 +120,81 @@ Reading:
 
 - Everything is a synthetic simulator, and the "true" impact law is the one the simulator implements. Calibration recovering it is a consistency check, not evidence about real markets. There is no real tape, queue dynamics, venue fees or adverse selection.
 - **Permanent impact is barely identified.** Its CI spans roughly 0 to 2x the truth, because a full day of price noise sits on the post-trade move. Order-level OOS MSE barely separates sqrt from linear (0.310 vs 0.313); only binned means do.
-- AC is solved for *linear* impact and mapped from the sqrt law at the TWAP rate. It does not know the intraday volume profile, which is why AC(kT=1) is not costlier than TWAP. A nonlinear, profile-aware optimiser is the next step.
-- POV is idealised: it sees current-interval volume without lag.
+- AC is solved for *linear* impact and mapped from the sqrt law at the TWAP rate. It does not know the intraday volume profile, which is why AC(kT=1) is not costlier than TWAP. *(Slice 3 adds the nonlinear, profile-aware optimiser.)*
+- POV is idealised: it sees current-interval volume without lag. *(Slice 3 adds an implementable lag-1 POV.)*
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
+
+## Slice 3 (2026-10-07): profile-aware sqrt-law optimum, equal-risk frontiers, exponent misspecification
+
+### What was added
+
+| Module | Content |
+|---|---|
+| `optimal_sqrt.py` | Mean-variance optimal static schedule in the simulator's own cost model: `min T(n) + P(n) + lam V(n)` over `n_j >= 0, sum n_j = X`, with `T = Y sigma_p sum n_j (n_j / v_j)^delta` on the expected U-profile `v_j`, permanent `P = (G sigma_p / 2 ADV)(X^2 - sum n_j^2)` and timing variance `V = (sigma_p^2 / N) sum r_j^2`. SLSQP with the analytic gradient, started from VWAP, KKT residual returned. `lam` has the same units as AC, so the same `lam` means the same risk aversion. |
+| `simulator.py` | `POV(rate, lag=1)`: sizes interval `j` on the previous interval's realised volume rescaled by the profile (`V_{j-1} u_j / u_{j-1}`), so it is implementable; `lag=0` is the old idealised POV. |
+| `comparison.py` | Adds `SQRT-OPT(kT=1, 3)` at AC's `lam` (calibrated coefficients) and `POV-lag1` to the out-of-sample table. |
+| `frontier.py` | Equal-risk comparison: bisect SQRT-OPT's `lam` until its *realised* IS std on the evaluation days equals AC's, then report the paired mean saving (same days). Also the realised `E + lam Var` at AC's own `lam`. |
+| `misspecification.py` | The simulator's true exponent is set to 0.35 / 0.5 / 0.65 / 0.8; metaorders are regenerated in that market and recalibrated. SQRT-OPT (plans with 0.5) and POWER-OPT (plans with the NLS estimate) are compared with AC at equal risk. The planner exponent is always an explicit argument, so no planner sees the true exponent. |
+
+### Test design
+
+- **Optimiser correctness**: with `lam = 0, G = 0` the KKT condition gives `n_j ∝ v_j` and the solver returns VWAP exactly; on a flat profile it returns TWAP; the analytic gradient matches finite differences; the closed-form permanent cost equals the interval sum; the KKT residual is ~0 and flags a non-optimal schedule; on its own model it beats TWAP, VWAP, the linearised AC schedule and random feasible perturbations; raising `lam` front-loads and trades expected cost for variance.
+- **Evaluation**: unchanged from slice 2 - calibration seed 0, evaluation seed 123 (4,000 days), every cost charged (5 bps spread, sqrt temporary, linear permanent), paired differences on common random numbers.
+- **Equal risk**: the bisection hits AC's realised std to 1e-6 relative; when even the risk-neutral SQRT-OPT is less risky than AC (AC kT=0.5), the row is flagged "lower risk" rather than forced.
+
+### Results (`python scripts/run_execution_comparison.py`)
+
+Same `lam` as AC, buy 5% ADV (bps; paired vs TWAP on the same days):
+
+| schedule | mean IS | std | p95 | vs TWAP (paired) | temporary | pre-trade est. |
+|---|---|---|---|---|---|---|
+| AC(kT=1) | 29.14 | 105.2 | 196.5 | -0.08 ± 0.13 | 24.34 | 27.70 |
+| SQRT-OPT(kT=1) | 29.27 | **88.0** | 170.0 | +0.06 ± 0.42 | 24.61 | 27.95 |
+| AC(kT=3) | 31.67 | 76.2 | 154.1 | +2.45 ± 0.69 | 27.06 | 30.36 |
+| SQRT-OPT(kT=3) | 39.78 | **45.7** | 114.8 | +10.56 ± 1.18 | 35.69 | 38.76 |
+| POV(6.25%), idealised | 29.13 | 97.1 | 186.3 | -0.09 ± 0.47 | 24.42 | - |
+| POV-lag1(6.25%) | 30.83 | 96.4 | 185.4 | **+1.61 ± 0.44** | 26.15 | - |
+
+At the same `lam` the two models sit at *different* frontier points, so this table alone does not say which schedule is better. Equal realised risk does:
+
+| buy | AC kT | AC std | AC mean | SQRT-OPT mean | saving at equal risk (paired) | realised E + lam Var, AC -> SQRT-OPT |
+|---|---|---|---|---|---|---|
+| 2% | 1 | 105.2 | 19.47 | 19.00 | +0.47 ± 0.15 | -5% |
+| 2% | 4 | 65.5 | 22.42 | 21.79 | +0.62 ± 0.15 | -23% |
+| 5% | 1 | 105.2 | 29.14 | 28.39 | +0.75 ± 0.16 | -5% |
+| 5% | 3 | 76.2 | 31.67 | 30.80 | +0.87 ± 0.15 | -19% |
+| 5% | 4 | 65.5 | 33.92 | 32.98 | +0.95 ± 0.15 | -23% |
+| 10% | 1 | 105.3 | 40.42 | 39.35 | +1.07 ± 0.16 | -5% |
+| 10% | 4 | 65.6 | 47.27 | 45.96 | +1.31 ± 0.15 | -23% |
+
+AC(kT=0.5) is dominated outright: the risk-neutral SQRT-OPT has both lower std (108.5 vs 110.4) and lower cost (+0.50 / +0.79 / +1.12 bps at 2 / 5 / 10%).
+
+Exponent misspecification, buy 5% ADV, saving vs AC at equal realised risk:
+
+| true delta | NLS delta_hat | kT | SQRT-OPT saving | POWER-OPT saving | SQRT - POWER |
+|---|---|---|---|---|---|
+| 0.35 | 0.380 ± 0.029 | 1 / 3 | +0.73 / +0.94 | +0.73 / +0.95 | 0.000 / +0.005 |
+| 0.50 | 0.550 ± 0.047 | 1 / 3 | +0.75 / +0.87 | +0.75 / +0.87 | 0.000 / -0.001 |
+| 0.65 | 0.727 ± 0.076 | 1 / 3 | +0.70 / +0.73 | +0.70 / +0.72 | 0.000 / -0.003 |
+| 0.80 | 0.911 ± 0.118 | 1 / 3 | +0.61 / +0.57 | +0.61 / +0.57 | 0.000 / -0.001 |
+
+(Savings SE ~0.15 bps throughout.)
+
+Reading:
+- **At equal risk the profile-aware optimum is cheaper than AC by 0.47-1.31 bps (3-8.5 SE), growing with order size and urgency.** The saving is about the size of the VWAP-vs-TWAP saving (0.53 / 0.83 / 1.18 bps), so most of it comes from *where* in the day it trades (the U-profile), not from the concavity of impact.
+- **The exponent barely matters for the schedule.** Planning with the estimated exponent instead of 0.5 changes cost by at most 0.005 bps across true exponents 0.35-0.8, even though NLS over-estimates the exponent by 0.03-0.11. The saving vs AC survives every misspecification tested.
+- **Same `lam` is not the same urgency.** AC's linearised impact over-charges fast trading, so at a given `lam` it under-reacts; SQRT-OPT at AC's `lam` cuts std 16% (kT=1) or 40% (kT=3) and pays for it in impact. Matching on realised risk needs SQRT-OPT's `lam` 4.6-7.9x smaller (5% ADV).
+- **Implementable POV costs 1.1-2.4 bps more than the idealised one** (paired vs TWAP +0.98 / +1.61 / +2.32 vs -0.09 / -0.09 / -0.10 at 2 / 5 / 10%). Profile-scaled previous-interval volume is a noisy forecast (interval noise 30%), and participation errors are charged through the concave impact. The idealised POV's apparent parity with TWAP was look-ahead.
+- **Pre-trade estimates stay accurate for SQRT-OPT** (within 0.75 bps of realised spread + temporary + permanent at every size and urgency).
+
+### Weaknesses (honest)
+
+- The "truth" is still the simulator's own model, and the planner's cost model is that same functional form; real books have queue dynamics, resilience and adverse selection, which would shrink or reverse a ~1 bps edge.
+- Static schedules only: no re-optimisation on realised volume or price (an adaptive / dynamic-programming policy is the natural next slice). POV-lag1 uses one naive forecast, not a fitted volume model.
+- Equal-risk savings are ~5 SE with 4,000 paired days; a single seed pair. The kT grid is coarse (0.5-4).
+- The misspecification study varies only the exponent; a wrong volume profile (e.g. event days) is the more likely real-world failure and is untested.
+- NLS exponent estimates are biased upwards at every true exponent; the binned estimator was not used for planning.
 
 ## Weaknesses / next slices (slice 1)
 
