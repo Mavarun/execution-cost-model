@@ -86,3 +86,36 @@ def test_miscalibrated_impact_biases_pretrade_estimate():
     sm = rb.summary
     realised = sm["mean_spread_bps"] + sm["mean_temporary_bps"] + sm["mean_permanent_bps"]
     assert rb.pretrade_estimate_bps > realised + 15.0
+
+
+# --- slice 3: profile-aware sqrt optimum and implementable POV -------------------
+
+def test_sqrt_optimum_at_the_same_lam_cuts_risk_at_no_significant_extra_cost(report):
+    r = report.by_name()
+    ac, sq = r["AC(kT=1)"], r["SQRT-OPT(kT=1)"]
+    assert sq.summary["std_total_bps"] < 0.9 * ac.summary["std_total_bps"]
+    gap = sq.paired_diff_vs_twap_bps - ac.paired_diff_vs_twap_bps
+    assert abs(gap) < 3 * (sq.paired_diff_se_bps + ac.paired_diff_se_bps)
+    # it front-loads into the heavy opening bins
+    assert sq.first_interval_share > ac.first_interval_share
+
+
+def test_sqrt_optimum_urgent_end_buys_much_lower_risk_for_more_impact(report):
+    r = report.by_name()
+    ac, sq = r["AC(kT=3)"], r["SQRT-OPT(kT=3)"]
+    assert sq.summary["std_total_bps"] < 0.7 * ac.summary["std_total_bps"]
+    assert sq.summary["mean_temporary_bps"] > ac.summary["mean_temporary_bps"]
+    assert sq.p95_total_bps < ac.p95_total_bps
+
+
+def test_lagged_pov_pays_for_its_volume_forecast_error(report):
+    pov = [s for s in report.schedules if s.name.startswith("POV(")][0]
+    lag = [s for s in report.schedules if s.name.startswith("POV-lag1")][0]
+    assert lag.summary["mean_temporary_bps"] > pov.summary["mean_temporary_bps"]
+    assert lag.paired_diff_vs_twap_bps > pov.paired_diff_vs_twap_bps + 2 * lag.paired_diff_se_bps
+    assert 0.9 < lag.summary["mean_completion"] < 1.0
+
+
+def test_new_schedules_can_be_switched_off():
+    names = [s.name for s in compare_schedules(q=0.05, n_paths=200, seed=1, sqrt_optimal=False, lagged_pov=False).schedules]
+    assert not any(n.startswith(("SQRT-OPT", "POV-lag1")) for n in names)
