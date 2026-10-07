@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Optimal-execution slice: impact calibration + TWAP/VWAP/POV/AC comparison.
+"""Optimal-execution slices: impact calibration, schedule comparison, frontiers.
 
 1. Calibrate a square-root impact law on synthetic TWAP metaorders
    (train split), report exponent CI and out-of-sample fit vs linear impact.
 2. Compare execution schedules for a buy of q x ADV on fresh simulated days
    (disjoint seed, common random numbers), net of spread, temporary and
-   permanent impact; decompose implementation shortfall in bps.
+   permanent impact; decompose implementation shortfall in bps. Includes
+   the profile-aware sqrt-law optimum (SQRT-OPT) and an implementable
+   lag-1 POV next to the idealised one.
+3. Realised frontiers: SQRT-OPT vs AC at equal realised IS std (paired
+   saving) and realised E + lam Var at AC's lam (``--no-frontier`` skips).
+4. Exponent misspecification: true exponent != 0.5, SQRT-OPT vs a planner
+   using the estimated exponent, both vs AC at equal risk
+   (``--no-misspec`` skips).
 
 Synthetic, seeded, offline. Not live PnL.
 """
@@ -22,6 +29,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from execution_cost.calibration import calibrate_impact, generate_metaorders  # noqa: E402
 from execution_cost.comparison import compare_schedules  # noqa: E402
+from execution_cost.frontier import realised_frontiers  # noqa: E402
+from execution_cost.misspecification import exponent_sensitivity  # noqa: E402
 from execution_cost.simulator import MarketParams  # noqa: E402
 
 
@@ -33,6 +42,10 @@ def parse_args(argv=None):
     p.add_argument("--calibration-seed", type=int, default=0)
     p.add_argument("--n-orders", type=int, default=20_000)
     p.add_argument("--spread-bps", type=float, default=5.0)
+    p.add_argument("--urgencies", type=float, nargs="+", default=[0.5, 1.0, 2.0, 3.0, 4.0], help="AC kappa*T grid")
+    p.add_argument("--true-deltas", type=float, nargs="+", default=[0.35, 0.5, 0.65, 0.8])
+    p.add_argument("--no-frontier", action="store_true")
+    p.add_argument("--no-misspec", action="store_true")
     p.add_argument("--json", action="store_true")
     p.add_argument("--out", type=Path, default=None)
     return p.parse_args(argv)
@@ -46,7 +59,38 @@ def build_report(args) -> dict:
         compare_schedules(mp, q=q, n_paths=args.n_paths, seed=args.seed, calibration=cal).to_dict()
         for q in args.q
     ]
-    return {"market": mp.__dict__, "calibration": cal.to_dict(), "comparisons": comps}
+    rep = {"market": mp.__dict__, "calibration": cal.to_dict(), "comparisons": comps}
+    if not args.no_frontier:
+        rep["frontiers"] = [
+            {
+                "q": q,
+                "points": [
+                    p.to_dict()
+                    for p in realised_frontiers(
+                        mp, q=q, urgencies=tuple(args.urgencies), n_paths=args.n_paths, seed=args.seed, calibration=cal
+                    )
+                ],
+            }
+            for q in args.q
+        ]
+    if not args.no_misspec:
+        q_mid = sorted(args.q)[len(args.q) // 2]
+        rep["misspecification"] = {
+            "q": q_mid,
+            "rows": [
+                r.to_dict()
+                for r in exponent_sensitivity(
+                    tuple(args.true_deltas),
+                    q=q_mid,
+                    n_paths=args.n_paths,
+                    seed=args.seed,
+                    calibration_seed=args.calibration_seed,
+                    n_orders=args.n_orders,
+                    market=mp,
+                )
+            ],
+        }
+    return rep
 
 
 def print_report(rep: dict) -> None:
@@ -70,6 +114,31 @@ def print_report(rep: dict) -> None:
                 f"{s['p95_total_bps']:.1f} | {s['paired_diff_vs_twap_bps']:+.2f} ± {s['paired_diff_se_bps']:.2f} | "
                 f"{s['mean_spread_bps']:.2f} | {s['mean_temporary_bps']:.2f} | {s['mean_permanent_bps']:.2f} | "
                 f"{s['mean_timing_bps']:.2f} | {s['mean_opportunity_bps']:.2f} | {s['mean_completion']:.3f} | {pre} |"
+            )
+    for fr in rep.get("frontiers", []):
+        print()
+        print(f"## Equal-risk frontier, buy {fr['q']:.0%} of ADV (SQRT-OPT lam bisected to AC's realised std)")
+        print("| AC kT | AC mean | AC std | SQRT-OPT mean | SQRT-OPT std | saving (paired) | E+lam Var AC ($) | E+lam Var SQRT-OPT same lam ($) |")
+        print("|---|---|---|---|---|---|---|---|")
+        for p in fr["points"]:
+            flag = "" if p["risk_matched"] else " (lower risk)"
+            print(
+                f"| {p['kappa_T']:g} | {p['ac_mean_bps']:.2f} | {p['ac_std_bps']:.1f} | {p['sqrt_mean_bps']:.2f} | "
+                f"{p['sqrt_std_bps']:.1f}{flag} | {p['paired_saving_bps']:+.2f} ± {p['paired_saving_se_bps']:.2f} | "
+                f"{p['ac_objective_usd']:,.0f} | {p['sqrt_objective_same_lam_usd']:,.0f} |"
+            )
+    ms = rep.get("misspecification")
+    if ms:
+        print()
+        print(f"## Exponent misspecification, buy {ms['q']:.0%} of ADV (savings vs AC at equal realised risk, bps)")
+        print("| true delta | NLS delta_hat | AC kT | AC mean | SQRT-OPT saving | POWER-OPT saving | SQRT - POWER |")
+        print("|---|---|---|---|---|---|---|")
+        for r in ms["rows"]:
+            print(
+                f"| {r['true_delta']:.2f} | {r['delta_hat']:.3f} ± {r['delta_hat_se']:.3f} | {r['kappa_T']:g} | "
+                f"{r['ac_mean_bps']:.2f} | {r['sqrt_saving_bps']:+.2f} ± {r['sqrt_saving_se_bps']:.2f} | "
+                f"{r['power_saving_bps']:+.2f} ± {r['power_saving_se_bps']:.2f} | "
+                f"{r['power_vs_sqrt_bps']:+.3f} ± {r['power_vs_sqrt_se_bps']:.3f} |"
             )
     print("\nSynthetic simulation only; not live PnL.")
 
