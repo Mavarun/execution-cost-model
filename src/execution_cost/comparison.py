@@ -6,8 +6,11 @@ Protocol
    set of synthetic metaorders (:func:`execution_cost.calibration.calibrate_impact`).
 2. **Build schedules** for a buy of ``q`` x ADV using only pre-trade
    information: TWAP; VWAP on the expected volume profile; POV at
-   ``pov_rate``; Almgren-Chriss with the *calibrated* coefficients mapped
-   to linear impact, at two urgencies ``kappa * T``.
+   ``pov_rate`` (idealised, and the implementable lag-1 version);
+   Almgren-Chriss with the *calibrated* coefficients mapped to linear
+   impact, at two urgencies ``kappa * T``; and the profile-aware sqrt-law
+   optimum (:mod:`execution_cost.optimal_sqrt`) with the same calibrated
+   coefficients at the *same* risk aversion ``lam`` as each AC urgency.
 3. **Evaluate** every schedule on the same fresh simulated days (common
    random numbers, a seed disjoint from calibration) under the *true*
    simulator parameters, and decompose implementation shortfall (spread,
@@ -29,6 +32,7 @@ import numpy as np
 
 from execution_cost.almgren_chriss import ACParams, ac_trade_list
 from execution_cost.calibration import CalibrationResult, calibrate_impact, generate_metaorders
+from execution_cost.optimal_sqrt import sqrt_schedule
 from execution_cost.schedules import ac_params_from_market, twap_schedule, vwap_schedule
 from execution_cost.shortfall import decompose_shortfall
 from execution_cost.simulator import POV, MarketParams, execute, simulate_market, volume_profile
@@ -123,6 +127,8 @@ def compare_schedules(
     calibration: CalibrationResult | None = None,
     calibration_seed: int = 0,
     fee_bps: float = 0.0,
+    sqrt_optimal: bool = True,
+    lagged_pov: bool = True,
 ) -> ComparisonReport:
     """Run the protocol in the module docstring for a buy of ``q`` x ADV."""
     mp = market or MarketParams()
@@ -143,6 +149,10 @@ def compare_schedules(
     for k in urgencies:
         lam = lam_for_urgency(base_ac, k)
         statics[f"AC(kT={k:g})"] = ac_trade_list(replace(base_ac, lam=lam))
+    if sqrt_optimal:
+        for k in urgencies:
+            lam = lam_for_urgency(base_ac, k)
+            statics[f"SQRT-OPT(kT={k:g})"] = sqrt_schedule(mp, X, lam, temp_coeff=Y, perm_coeff=G)
 
     mk = simulate_market(mp, n_paths, seed=seed)
     results: dict[str, tuple] = {}
@@ -151,6 +161,9 @@ def compare_schedules(
         results[name] = (br, pretrade_estimate_bps(sched, mp, X, Y, G), sched[0] / X)
     br_pov = decompose_shortfall(execute(POV(pov_rate), mk, mp, X), fee_bps=fee_bps)
     results[f"POV({pov_rate:.3f})"] = (br_pov, None, None)
+    if lagged_pov:
+        br_lag = decompose_shortfall(execute(POV(pov_rate, lag=1), mk, mp, X), fee_bps=fee_bps)
+        results[f"POV-lag1({pov_rate:.3f})"] = (br_lag, None, None)
 
     twap_total = results["TWAP"][0].total
     out = []
