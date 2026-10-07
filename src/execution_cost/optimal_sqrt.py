@@ -194,7 +194,13 @@ def sqrt_schedule(
     lam: float,
     temp_coeff: float | None = None,
     perm_coeff: float | None = None,
+    temp_exponent: float | None = None,
 ) -> np.ndarray:
-    """Trade list (sums to ``target``) for ``market`` at risk aversion ``lam``."""
-    prob = SqrtExecutionProblem.from_market(market, target, lam, temp_coeff, perm_coeff)
+    """Trade list (sums to ``target``) for ``market`` at risk aversion ``lam``.
+
+    ``temp_exponent`` is the exponent the *planner* assumes; it defaults to
+    ``market.temp_exponent``. Pass it explicitly when the planner should not
+    see the simulator's true exponent (see :mod:`execution_cost.misspecification`).
+    """
+    prob = SqrtExecutionProblem.from_market(market, target, lam, temp_coeff, perm_coeff, temp_exponent)
     return solve_sqrt_schedule(prob).trades

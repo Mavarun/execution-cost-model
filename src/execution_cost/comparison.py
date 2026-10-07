@@ -152,7 +152,7 @@ def compare_schedules(
     if sqrt_optimal:
         for k in urgencies:
             lam = lam_for_urgency(base_ac, k)
-            statics[f"SQRT-OPT(kT={k:g})"] = sqrt_schedule(mp, X, lam, temp_coeff=Y, perm_coeff=G)
+            statics[f"SQRT-OPT(kT={k:g})"] = sqrt_schedule(mp, X, lam, temp_coeff=Y, perm_coeff=G, temp_exponent=0.5)
 
     mk = simulate_market(mp, n_paths, seed=seed)
     results: dict[str, tuple] = {}
