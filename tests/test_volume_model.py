@@ -56,3 +56,32 @@ def test_nowcast_beats_lag1_out_of_sample_on_normal_days():
     e_now = log_forecast_errors(test, m.forecast)[:, 1:]
     e_lag = log_forecast_errors(test, lambda o, j: lag1_forecast(o, j, m.profile, mp.adv))[:, 1:]
     assert np.sqrt(np.mean(e_now**2)) < 0.8 * np.sqrt(np.mean(e_lag**2))
+
+
+def test_surge_nowcast_learns_persistence_only_when_it_exists():
+    from execution_cost.simulator import EventParams
+    from execution_cost.volume_model import fit_surge_nowcast
+
+    mp = MarketParams()
+    iid = simulate_market(mp, 800, seed=31).volumes
+    base, _ = fit_nowcast(iid, mp.adv)
+    _, info = fit_surge_nowcast(base, iid)
+    ev = simulate_market(mp, 800, seed=31, events=EventParams(prob=0.5, surge=6.0)).volumes
+    base_e, _ = fit_nowcast(ev, mp.adv)
+    _, info_e = fit_surge_nowcast(base_e, ev)
+    assert info_e["phi"] > info["phi"] + 0.05
+
+
+def test_surge_nowcast_beats_day_factor_on_event_days_out_of_sample():
+    from execution_cost.simulator import EventParams
+    from execution_cost.volume_model import fit_surge_nowcast
+
+    mp = MarketParams()
+    e = EventParams(prob=0.3, surge=6.0)
+    train = simulate_market(mp, 800, seed=41, events=e).volumes
+    test = simulate_market(mp, 2000, seed=42, events=EventParams(prob=1.0, surge=6.0))
+    base, _ = fit_nowcast(train, mp.adv)
+    surge, _ = fit_surge_nowcast(base, train)
+    eb = log_forecast_errors(test.volumes, base.forecast)[:, 1:]
+    es = log_forecast_errors(test.volumes, surge.forecast)[:, 1:]
+    assert np.mean(es**2) < np.mean(eb**2)
