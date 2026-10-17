@@ -65,6 +65,10 @@ python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-
 - `src/execution_cost/optimal_sqrt.py` - profile-aware mean-variance optimum under the sqrt law (SLSQP)
 - `src/execution_cost/frontier.py` - SQRT-OPT vs AC at equal realised risk
 - `src/execution_cost/misspecification.py` - true impact exponent != 0.5
+- `src/execution_cost/volume_model.py` - fitted profile, day-factor and surge nowcasts
+- `src/execution_cost/adaptive.py` - re-optimising sqrt-law policy, nowcast POV
+- `src/execution_cost/adaptive_eval.py` - slice-4 harness (normal vs event days)
+- `scripts/run_adaptive_slice.py` - CLI for slice 4
 - `scripts/run_cost_slice.py` - CLI for baseline + cost curve
 - `scripts/run_execution_comparison.py` - CLI for the execution slice
 - `.github/workflows/tests.yml` - pytest CI (py3.11 / 3.12)
@@ -124,6 +128,65 @@ Reading:
 - POV is idealised: it sees current-interval volume without lag. *(Slice 3 adds an implementable lag-1 POV.)*
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
+
+## Slice 4 (2026-10-17): adaptive re-optimisation, fitted volume nowcasts, event days
+
+Slice 3 listed three weaknesses: schedules were **static** (no re-optimisation on realised volume), POV-lag1 used **one naive forecast** rather than a fitted volume model, and a **wrong volume profile** (event days) was untested. This slice tests all three.
+
+### What was added
+
+| Module | Content |
+|---|---|
+| `simulator.py` | `EventParams`: 15% of days get an unplanned volume surge (4x, decaying 0.6 per interval, 4 intervals, random start). Events use their own random stream, so a seed's normal days are identical with and without events. `execute` also runs *adaptive policies* that see only the volumes realised before each interval. |
+| `volume_model.py` | Fitted intraday profile (mean daily share on training days; no planner sees the simulator's profile), a **day-factor nowcast** from today's volume so far, shrunk toward 1 with `k0` pseudo-intervals (`k0` chosen on training days by log-forecast MSE), and a **surge nowcast** adding an AR(1) term on the last interval's log surprise (`phi` by least squares on training days). |
+| `adaptive.py` | `AdaptiveSqrtOpt`: every interval, re-solve the slice-3 mean-variance sqrt-law problem for the shares left over the intervals left, with volume = fitted profile x nowcast day factor, and trade the first leg. Uses the scaling `argmin w(R, D) = argmin w(R D, 1)` to precompute first-leg fractions on a log grid. `NowcastPOV`: POV sized on a nowcast forecast. |
+| `adaptive_eval.py` | Harness: impact calibrated on metaorders (seed 0), volume model fitted on 500 training days (seed 7, events at the same rate), evaluation on 4,000 fresh days (seed 123), common random numbers, 5 bps spread + sqrt temporary + linear permanent impact charged, IS in bps by all / normal / event days, paired differences, realised `E + lam Var`. |
+| `scripts/run_adaptive_slice.py` | Grid q in {2, 5, 10}% ADV x kT in {1, 3}; sensitivity to day-volume noise (0.2 / 0.5) and surge size (4x / 8x). Writes `artifacts/adaptive_slice.{json,md}`. |
+
+### Test design
+
+- Events: normal days byte-identical with and without events; surge multipliers exact inside the window and 1 outside; event share matches `prob`.
+- No look-ahead: a policy's trades up to interval `j` do not change when later volumes change; forecasts at `j` ignore volumes at `j` and later.
+- Adaptive correctness: the first leg at interval 0 equals the static optimum's; on a noise-free day the adaptive policy **replays the static schedule** (mean-variance with known volume is time consistent); it speeds up on heavy days and slows on thin ones; it always completes.
+- Volume model: fitted profile within 3% of the true U-shape; nowcast exact on noise-free days; `phi` is larger when surges exist; nowcasts beat lag-1 out of sample.
+- Harness: disjoint seeds enforced; `REPLAN` (re-optimise with day factor fixed at 1) equals static (control, |diff| < 0.02 bps); reproducible.
+
+### Results (`python scripts/run_adaptive_slice.py`, 4,000 days, 566 event days)
+
+Forecast log RMSE on evaluation days: lag-1 **0.441**, day-factor nowcast **0.352**, + surge AR(1) **0.347** (event days 0.522 / 0.496 / 0.471). Fitted `k0` = 4, `phi` = 0.15.
+
+Paired differences in bps (± SE, same days):
+
+| q | kT | ADAPTIVE - SQRT-OPT (all / event) | utility | NOWCAST-POV - POV-lag1 (all / event) | SURGE-POV - NOWCAST-POV (all / event) |
+|---|---|---|---|---|---|
+| 2% | 1 | -0.01 ± 0.02 / -0.03 ± 0.05 | -0.03% | -0.24 ± 0.16 / -0.40 ± 0.64 | -0.07 ± 0.03 / -0.17 ± 0.09 |
+| 5% | 1 | -0.01 ± 0.02 / -0.03 ± 0.05 | -0.03% | **-0.39 ± 0.16** / -0.95 ± 0.65 | **-0.11 ± 0.03** / -0.22 ± 0.09 |
+| 5% | 3 | -0.02 ± 0.02 / -0.01 ± 0.05 | -0.05% | -0.39 ± 0.16 / -0.95 ± 0.65 | -0.11 ± 0.03 / -0.22 ± 0.09 |
+| 10% | 1 | -0.01 ± 0.02 / -0.03 ± 0.05 | -0.02% | **-0.55 ± 0.17** / -1.55 ± 0.65 | **-0.16 ± 0.03** / -0.28 ± 0.09 |
+| 10% | 3 | -0.02 ± 0.02 / -0.00 ± 0.05 | -0.08% | -0.55 ± 0.17 / -1.55 ± 0.65 | -0.16 ± 0.03 / -0.28 ± 0.09 |
+
+(POV rows do not depend on kT.) Sensitivity at q = 5%, kT = 3:
+
+| day-volume noise | surge | ADAPTIVE - SQRT-OPT (all / event) | utility | std ADAPTIVE / static |
+|---|---|---|---|---|
+| 0.2 (default) | 4x | -0.02 ± 0.02 / -0.01 ± 0.05 | -0.05% | 46.2 / 46.2 |
+| 0.2 | 8x | -0.00 ± 0.01 / -0.02 ± 0.05 | -0.06% | 46.5 / 46.6 |
+| 0.5 | 4x | **-0.52 ± 0.07** / -0.47 ± 0.18 | -0.38% | 47.8 / 47.2 |
+| 0.5 | 8x | **-0.48 ± 0.07** / -0.48 ± 0.18 | -0.40% | 48.0 / 47.5 |
+
+Reading:
+- **Re-optimising on realised volume is worth ~0.01 bps at the default day-volume noise (20%)**, within 1 SE at every size and urgency, even on event days. Under the sqrt law, the optimal schedule hardly moves when the whole day's volume scales by D: temporary cost scales as D^-0.5 and only `sqrt(R D)` enters the trade-off. A negative result for "adaptive beats static" in this market.
+- **It starts to pay when day volume is very uncertain**: at 50% day-volume noise the adaptive policy saves 0.5 bps (7 SE) and lowers realised `E + lam Var` by 0.4%, with slightly *higher* IS std (it trades faster on heavy days).
+- **The fitted volume model is the real gain for POV**: the day-factor nowcast cuts forecast error 20% and POV cost 0.24 / 0.39 / 0.55 bps at 2 / 5 / 10% ADV (1.5-3.2 SE), and lifts completion 0.987 -> 0.997. The surge term adds 0.07-0.16 bps (2-5 SE). POV still costs 1.2-1.9 bps more than static SQRT-OPT at kT = 1.
+- **Event days do not break the static schedules here**: static SQRT-OPT is no worse on event days (extra volume lowers participation). They hurt POV-lag1 most (+3.1 bps vs static at 5% ADV on event days, vs +1.5 on normal days), because a surge inflates its next-interval forecast after the surge has decayed.
+
+### Weaknesses (honest)
+
+- Same simulator as slices 2-3: the planner's cost model has the simulator's functional form, so real adaptive gains (queue dynamics, price-volume feedback) are untested. Event days are a parametric surge, not real news-day tape.
+- The adaptive policy re-optimises on volume only. It ignores the realised price path; with arithmetic Brownian prices and mean-variance utility that is close to optimal, but a price-adaptive (aggressive-in-the-money) policy is untested.
+- The adaptive policy uses the day-factor nowcast, not the surge nowcast, because the precomputed grid assumes a uniform scaling of the remaining profile. A per-path re-solve with the surge shape is the obvious next step.
+- One seed triple (0 / 7 / 123); 566 event days give event-split SEs of 0.05-0.65 bps. The 50%-noise result is a single sensitivity cell.
+- `k0` and `phi` are fitted once on 500 training days; there is no rolling refit across regimes.
 
 ## Slice 3 (2026-10-07): profile-aware sqrt-law optimum, equal-risk frontiers, exponent misspecification
 
