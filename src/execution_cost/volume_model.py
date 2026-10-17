@@ -95,3 +95,42 @@ def fit_nowcast(train_volumes: np.ndarray, adv: float, k0_grid=K0_GRID) -> tuple
         scores[float(k0)] = float(np.mean(e**2))
     best = min(scores, key=lambda k: (scores[k], k))
     return DayFactorNowcast(u, adv, best), {"k0_mse": scores, "k0": best}
+
+
+@dataclass(frozen=True)
+class SurgeNowcast:
+    """Day-factor nowcast plus an AR(1) on the last interval's log surprise.
+
+    ``V_hat_j = ADV u_hat_j D_hat_j exp(phi r_{j-1})`` with
+    ``r_{j-1} = log(V_{j-1} / V_hat^{day}_{j-1})``. A volume surge (event
+    day) shows up as a run of positive surprises; ``phi`` is fitted by least
+    squares on training days, so on i.i.d. interval noise it shrinks to ~0.
+    """
+
+    base: DayFactorNowcast
+    phi: float
+
+    @property
+    def profile(self) -> np.ndarray:
+        return self.base.profile
+
+    def day_factor(self, observed: np.ndarray) -> np.ndarray:
+        return self.base.day_factor(observed)
+
+    def last_surprise(self, observed: np.ndarray) -> np.ndarray:
+        obs = np.asarray(observed, dtype=float)
+        j = obs.shape[1]
+        if j == 0:
+            return np.zeros(obs.shape[0])
+        return np.log(obs[:, j - 1] / self.base.forecast(obs[:, : j - 1], j - 1))
+
+    def forecast(self, observed: np.ndarray, j: int) -> np.ndarray:
+        return self.base.forecast(observed, j) * np.exp(self.phi * self.last_surprise(observed))
+
+
+def fit_surge_nowcast(base: DayFactorNowcast, train_volumes: np.ndarray) -> tuple[SurgeNowcast, dict]:
+    """Least-squares AR(1) slope of log surprise r_j on r_{j-1} (training days)."""
+    e = log_forecast_errors(train_volumes, base.forecast)
+    x, y = e[:, 1:-1].ravel(), e[:, 2:].ravel()
+    phi = float((x @ y) / (x @ x)) if (x @ x) > 0 else 0.0
+    return SurgeNowcast(base, phi), {"phi": phi, "n_pairs": int(x.size)}
