@@ -96,3 +96,22 @@ class AdaptiveSqrtOpt:
             return remaining
         d = self.nowcast.day_factor(observed) if self.adapt else np.ones(len(remaining))
         return remaining * self.fraction(j, remaining, d)
+
+
+@dataclass
+class NowcastPOV:
+    """Implementable POV sized on the day-factor nowcast instead of lag-1 volume.
+
+    Like :class:`execution_cost.simulator.POV` it never forces completion:
+    shares it does not reach by the close are opportunity cost.
+    """
+
+    rate: float
+    nowcast: DayFactorNowcast
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.rate < 1.0:
+            raise ValueError("POV rate must be in (0, 1)")
+
+    def shares(self, j, observed, remaining, params):
+        return self.rate * self.nowcast.forecast(observed, j)
