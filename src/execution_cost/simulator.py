@@ -21,6 +21,12 @@ Execution of ``n_j`` shares in interval ``j`` (``side=+1`` buy, ``-1`` sell):
 
 Market randomness is generated once (:func:`simulate_market`) and reused for
 every schedule, so schedule comparisons use common random numbers.
+
+Event days (optional :class:`EventParams`): a share of days get a volume
+surge (news, index event) that starts at a random interval and decays
+geometrically. The planner's U-profile is then wrong for that day. Events
+use their own random stream, so the non-event days of a seed are identical
+with and without events.
 """
 
 from __future__ import annotations
@@ -64,6 +70,33 @@ def volume_profile(n_intervals: int, u_shape: float = 1.5) -> np.ndarray:
     return w / w.sum()
 
 
+@dataclass(frozen=True)
+class EventParams:
+    """Volume-surge event days the planner's profile does not know about.
+
+    With probability ``prob`` a day has an event starting at an interval
+    drawn uniformly from ``[min_start, N - length]``; interval ``k`` of the
+    event (``k = 0 .. length-1``) has volume multiplied by
+    ``1 + (surge - 1) decay^k``.
+    """
+
+    prob: float = 0.15
+    surge: float = 4.0
+    length: int = 4
+    decay: float = 0.6
+    min_start: int = 2
+
+    def __post_init__(self):
+        if not 0.0 <= self.prob <= 1.0:
+            raise ValueError("event prob must be in [0, 1]")
+        if self.surge < 1.0 or self.length < 1 or not 0.0 < self.decay <= 1.0:
+            raise ValueError("need surge >= 1, length >= 1, decay in (0, 1]")
+
+    def multipliers(self) -> np.ndarray:
+        k = np.arange(self.length, dtype=float)
+        return 1.0 + (self.surge - 1.0) * self.decay**k
+
+
 @dataclass
 class MarketPaths:
     """Exogenous randomness for ``n_paths`` days (shared across schedules)."""
@@ -71,13 +104,20 @@ class MarketPaths:
     noise_increments: np.ndarray  # (P, N) unaffected mid changes, price units
     volumes: np.ndarray  # (P, N) realised interval volumes, shares
     profile: np.ndarray  # (N,) expected volume fractions
+    is_event: np.ndarray | None = None  # (P,) bool, event days
+    event_start: np.ndarray | None = None  # (P,) int, -1 on normal days
 
     @property
     def n_paths(self) -> int:
         return int(self.volumes.shape[0])
 
 
-def simulate_market(params: MarketParams, n_paths: int, seed: int = 0) -> MarketPaths:
+def simulate_market(
+    params: MarketParams,
+    n_paths: int,
+    seed: int = 0,
+    events: EventParams | None = None,
+) -> MarketPaths:
     rng = np.random.default_rng(seed)
     N = params.n_intervals
     prof = volume_profile(N, params.u_shape)
@@ -87,7 +127,20 @@ def simulate_market(params: MarketParams, n_paths: int, seed: int = 0) -> Market
     day = np.exp(sd * rng.standard_normal((n_paths, 1)) - 0.5 * sd**2)
     intr = np.exp(sv * rng.standard_normal((n_paths, N)) - 0.5 * sv**2)
     vols = params.adv * prof[None, :] * day * intr
-    return MarketPaths(noise_increments=noise, volumes=vols, profile=prof)
+    if events is None:
+        return MarketPaths(noise_increments=noise, volumes=vols, profile=prof)
+    if events.min_start > N - events.length:
+        raise ValueError("event does not fit in the day")
+    erng = np.random.default_rng([seed, 0xE7E])
+    is_event = erng.random(n_paths) < events.prob
+    start = erng.integers(events.min_start, N - events.length + 1, size=n_paths)
+    start = np.where(is_event, start, -1)
+    mult = events.multipliers()
+    for p in np.flatnonzero(is_event):
+        vols[p, start[p] : start[p] + events.length] *= mult
+    return MarketPaths(
+        noise_increments=noise, volumes=vols, profile=prof, is_event=is_event, event_start=start
+    )
 
 
 @dataclass
