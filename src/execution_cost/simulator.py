@@ -225,7 +225,11 @@ def execute(
     """Run a schedule against every simulated day.
 
     ``schedule`` is a static trade list of length ``N`` (or ``(P, N)``) that
-    should sum to ``target``, or a :class:`POV` instance. Static trades are
+    should sum to ``target``, a :class:`POV` instance, or an *adaptive
+    policy*: any object with ``shares(j, observed, remaining, params)``
+    returning ``(P,)`` shares for interval ``j``, where ``observed`` is the
+    ``(P, j)`` block of volumes realised *before* interval ``j`` (no
+    look-ahead) and ``remaining`` the shares still to trade. Static trades are
     capped so cumulative shares never exceed ``target``. ``target`` may be a
     ``(P,)`` array to give every simulated day its own order size (used for
     metaorder calibration).
@@ -246,7 +250,8 @@ def execute(
     perm = np.zeros(P)
     noise = np.zeros(P)
     static = None
-    if not isinstance(schedule, POV):
+    adaptive = hasattr(schedule, "shares") and not isinstance(schedule, POV)
+    if not isinstance(schedule, POV) and not adaptive:
         static = np.broadcast_to(np.asarray(schedule, dtype=float), (P, N))
         if (static < -1e-12).any():
             raise ValueError("static schedules must be non-negative")
@@ -254,6 +259,11 @@ def execute(
         vol = market.volumes[:, j]
         if static is not None:
             n = np.minimum(static[:, j], remaining)
+        elif adaptive:
+            n = np.minimum(
+                np.asarray(schedule.shares(j, market.volumes[:, :j], remaining.copy(), params), dtype=float),
+                remaining,
+            )
         else:
             n = np.minimum(schedule.rate * schedule.volume_signal(market, params, j), remaining)
         n = np.maximum(n, 0.0)
