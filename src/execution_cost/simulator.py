@@ -230,7 +230,11 @@ def execute(
     returning ``(P,)`` shares for interval ``j``, where ``observed`` is the
     ``(P, j)`` block of volumes realised *before* interval ``j`` (no
     look-ahead) and ``remaining`` the shares still to trade. Static trades are
-    capped so cumulative shares never exceed ``target``. ``target`` may be a
+    capped so cumulative shares never exceed ``target``. A policy with
+    ``uses_prices = True`` is also passed ``mid_move``, the ``(P,)`` signed
+    move of the mid since arrival observed just before interval ``j``
+    (``side * (mid_j - arrival)``, own permanent impact included; never a
+    later price). ``target`` may be a
     ``(P,)`` array to give every simulated day its own order size (used for
     metaorder calibration).
     """
@@ -255,19 +259,26 @@ def execute(
         static = np.broadcast_to(np.asarray(schedule, dtype=float), (P, N))
         if (static < -1e-12).any():
             raise ValueError("static schedules must be non-negative")
+    uses_prices = adaptive and bool(getattr(schedule, "uses_prices", False))
     for j in range(N):
         vol = market.volumes[:, j]
+        # Mid just before interval j trades: known to the trader at decision time.
+        mid = params.s0 + noise + perm
         if static is not None:
             n = np.minimum(static[:, j], remaining)
         elif adaptive:
-            n = np.minimum(
-                np.asarray(schedule.shares(j, market.volumes[:, :j], remaining.copy(), params), dtype=float),
-                remaining,
-            )
+            if uses_prices:
+                # Signed move of the observed mid since arrival (own permanent
+                # impact included, as a real trader would see it): > 0 means
+                # the price has moved *against* the order.
+                shares = schedule.shares(j, market.volumes[:, :j], remaining.copy(), params,
+                                         side * (mid - params.s0))
+            else:
+                shares = schedule.shares(j, market.volumes[:, :j], remaining.copy(), params)
+            n = np.minimum(np.asarray(shares, dtype=float), remaining)
         else:
             n = np.minimum(schedule.rate * schedule.volume_signal(market, params, j), remaining)
         n = np.maximum(n, 0.0)
-        mid = params.s0 + noise + perm
         temp = temporary_impact(n / vol, params)
         trades[:, j] = n
         mids[:, j] = mid
