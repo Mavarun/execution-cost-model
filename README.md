@@ -48,6 +48,7 @@ python scripts/run_cost_slice.py --json --out artifacts/cost_slice.json
 python scripts/run_execution_comparison.py          # calibration + schedule comparison tables
 python scripts/run_execution_comparison.py --json --out artifacts/execution.json
 python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-2/3 tables only (fast)
+python scripts/run_price_adaptive_slice.py                              # slice 5 (~13 min)
 ```
 
 ## Layout
@@ -68,6 +69,8 @@ python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-
 - `src/execution_cost/volume_model.py` - fitted profile, day-factor and surge nowcasts
 - `src/execution_cost/adaptive.py` - re-optimising sqrt-law policy, nowcast POV
 - `src/execution_cost/adaptive_eval.py` - slice-4 harness (normal vs event days)
+- `src/execution_cost/price_adaptive_eval.py` - slice-5 walk-forward harness for the aggressive-in-the-money policy
+- `scripts/run_price_adaptive_slice.py` - CLI for slice 5
 - `scripts/run_adaptive_slice.py` - CLI for slice 4
 - `scripts/run_cost_slice.py` - CLI for baseline + cost curve
 - `scripts/run_execution_comparison.py` - CLI for the execution slice
@@ -128,6 +131,48 @@ Reading:
 - POV is idealised: it sees current-interval volume without lag. *(Slice 3 adds an implementable lag-1 POV.)*
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
+
+## Slice 5 (2026-10-25): price-adaptive (aggressive-in-the-money) execution
+
+Slice 4 left two weaknesses open: its adaptive policy **ignored the realised price path**, and it ran on **one seed triple**. This slice adds the Almgren-Lorenz (2007) "aggressive in the money" (AIM) policy. The policy's strength is chosen walk-forward, and it is scored on three disjoint seed triples.
+
+### What was added
+
+| Module | Content |
+|---|---|
+| `simulator.py` | Policies with `uses_prices = True` also receive `mid_move = side * (mid_j - arrival)`, the mid just before interval `j` trades (own impact included, never a later price). |
+| `adaptive.py` | `PriceAdaptiveSqrtOpt`: re-solve the rest of the order with risk aversion `lam * m`, where `m = clip(exp(a z), e^-2, e^2)` and `z` is the standardised *exogenous* move since arrival (own permanent impact under the calibrated `G` removed), positive when the price moved in the order's favour. `a > 0` speeds up when in the money (AIM), `a < 0` is the passive mirror, and `a = 0` is the plan. With the 0.5 planner exponent, `lam m` at `R` equals `lam` at `R m^2`, so slice 4's precomputed grid is reused at no extra solve cost. |
+| `price_adaptive_eval.py` | Walk-forward harness. Impact is calibrated on metaorders and the profile fitted on 2,000 training days. `a` is chosen from {-0.5, -0.25, 0, 0.25, 0.5, 1} by **realised `E + lam Var` on training days** (`a = 0` included, so "do not adapt" can win). The policy is then scored on 4,000 disjoint evaluation days vs static SQRT-OPT, with common random numbers, 5 bps spread, sqrt temporary and linear permanent impact charged, 15% event days, paired IS difference ± SE, and a paired-bootstrap 95% CI on the utility change. The oracle `a` (best on evaluation days) is reported only to measure selection loss. |
+| `scripts/run_price_adaptive_slice.py` | q in {5, 10}% ADV x kT in {1, 3} x seed triples (calibration / training / evaluation) (0/7/123), (1/8/124), (2/9/125). Writes `artifacts/price_adaptive_slice.md` (and an ignored `.json`). |
+
+### Test design
+
+- No look-ahead: changing prices from interval 13 on leaves trades up to 13 unchanged. `mid_move` equals the recorded pre-trade mid, and a static schedule replayed through a price-aware recorder fills identically.
+- `a = 0` reproduces the plan-only re-solve exactly and the static optimum within 3%. The multiplier has the right sign, is clipped, and removes own impact. AIM trades more after a favourable move and the passive mirror less. Every day completes.
+- Harness: `a` is chosen from training utility only; seeds must be disjoint; the grid must contain 0; the bootstrap CI is exact on constant shifts.
+
+### Results (`python scripts/run_price_adaptive_slice.py`, ~13 min)
+
+Utility change = chosen - static realised `E + lam Var` (negative = better). Full table in `artifacts/price_adaptive_slice.md`.
+
+| q | kT | chosen a (3 triples) | IS mean diff, bps | IS std, static → AIM | utility change | 95% CI excludes 0 |
+|---|---|---|---|---|---|---|
+| 5% | 1 | 0, 0.25, 0.25 | +0.01 to +0.11 | 88.5 → 88.1 | -0.00% / +0.17% / +0.07% | 0 of 3 |
+| 10% | 1 | 0, 0.25, 0.25 | +0.01 to +0.13 | 88.5 → 88.1 | -0.00% / +0.11% / +0.02% | 0 of 3 |
+| 5% | 3 | 0.5, 0.5, 0.5 | +0.49 to +0.56 | 46.0 → 44.2 | **-0.57% / -0.40% / -0.86%** | 1 of 3 |
+| 10% | 3 | 0.5, 0.5, 0.5 | +0.67 to +0.78 | 46.1 → 43.6 | **-1.33% / -1.14% / -1.60%** | **3 of 3** |
+
+Reading:
+- **AIM pays only for urgent, larger orders.** At kT = 3 it lowers realised `E + lam Var` in all 6 cells, by 0.4-1.6%. It does this the way the theory says, by paying **0.5-0.8 bps more on average** (4-6 SE) to cut IS std by 1.4-2.8 bps. At 10% ADV the bootstrap CI excludes zero on every seed triple. At 5% ADV it does so on one of three.
+- **At kT = 1 there is nothing to gain**: the oracle `a` is 0 in all 6 cells. Training picked `a = 0.25` in 4 of them, costing +0.02% to +0.17% utility (CI includes 0). That is the selection loss of a 6-point grid chosen on 2,000 noisy days.
+- **The mean-IS ranking and the objective disagree.** Judged on mean IS alone, AIM always looks worse. The claim here is the mean-variance objective both planners minimise, not a lower expected cost.
+
+### Weaknesses (honest)
+
+- Same synthetic simulator: arithmetic Brownian mid, no drift, no momentum or mean reversion. With a real price drift or a signal-driven order, "in the money" is correlated with future moves and AIM could lose. That case is untested.
+- The policy is a one-parameter heuristic (lam scaled by `exp(a z)`), not the Almgren-Lorenz dynamic-programming optimum. `a` is chosen on a 6-point grid, and the gain at 5% ADV is within 2 SE on two of three triples.
+- The variance reduction is measured on the same mean-variance utility used for selection. A trader with a different loss (shortfall quantile, tracking a benchmark) would need its own evaluation. The 95th percentile is in the JSON but not optimised.
+- Price and volume adaptation are tested separately (`adapt = False` here). Their combination and the surge-shaped re-solve from slice 4 are still open.
 
 ## Slice 4 (2026-10-17): adaptive re-optimisation, fitted volume nowcasts, event days
 
