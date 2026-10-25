@@ -71,12 +71,16 @@ class AdaptiveSqrtOpt:
     perm_coeff: float
     n_grid: int = 40
     adapt: bool = True  # False: always D_hat = 1 (re-solve on the plan only)
+    grid_span: float = 1.0  # widen the z grid by this factor each side (price-adaptive use)
     _grid: np.ndarray = field(init=False, repr=False)
     _w0: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         X = float(self.target)
-        lo, hi = np.sqrt(1e-4 * X * 0.2), np.sqrt(X * 5.0)
+        if self.grid_span < 1.0:
+            raise ValueError("grid_span must be >= 1")
+        lo = np.sqrt(1e-4 * X * 0.2) / self.grid_span
+        hi = np.sqrt(X * 5.0) * self.grid_span
         self._grid = np.geomspace(lo, hi, self.n_grid)
         N = self.params.n_intervals
         self._w0 = np.ones((N, self.n_grid))
@@ -96,6 +100,61 @@ class AdaptiveSqrtOpt:
             return remaining
         d = self.nowcast.day_factor(observed) if self.adapt else np.ones(len(remaining))
         return remaining * self.fraction(j, remaining, d)
+
+
+@dataclass
+class PriceAdaptiveSqrtOpt(AdaptiveSqrtOpt):
+    """Aggressive-in-the-money sqrt-law policy (Almgren & Lorenz 2007, AIM).
+
+    Under a mean-variance objective on *realised* cost, a static schedule is
+    not optimal among adaptive ones: after a favourable move (the trader is
+    "in the money") the cost budget can absorb more impact, so trading faster
+    to lock the gain in lowers variance at a small expected cost, and the
+    reverse after an adverse move. This policy re-solves the rest of the order
+    with risk aversion ``lam * m`` where
+
+        z_j = -(mid_move_j - G sigma_p (X - R_j) / ADV) / (sigma_p sqrt(j / N))
+        m_j = clip(exp(a z_j), m_min, m_max)
+
+    ``z`` is the standardised *exogenous* move (the policy's own known
+    permanent impact under the calibrated ``G`` is removed), positive when the
+    price moved in the order's favour. ``a > 0`` is AIM, ``a < 0`` the passive
+    (PIM) mirror, ``a = 0`` re-plans the static schedule. ``a`` is a free
+    parameter: it is chosen on training days, never on evaluation days.
+
+    Scaling: with the 0.5 planner exponent the first-leg fraction depends on
+    ``lam`` and ``R D`` only through ``lam sqrt(R D)``, so ``lam m`` equals
+    ``R D m^2`` at ``lam`` and the parent's precomputed grid is reused at
+    ``z' = sqrt(R D) m`` (``grid_span`` widens it to cover ``m`` up to
+    ``m_max``). ``adapt`` (volume nowcast) defaults to off so the price
+    reaction is measured on its own.
+    """
+
+    a: float = 0.0
+    m_min: float = float(np.exp(-2.0))
+    m_max: float = float(np.exp(2.0))
+    adapt: bool = False
+    grid_span: float = float(np.exp(2.0))
+    uses_prices = True
+
+    def multiplier(self, j: int, mid_move: np.ndarray, remaining: np.ndarray) -> np.ndarray:
+        mp = self.params
+        if j == 0 or self.a == 0.0:
+            return np.ones(len(remaining))
+        own = self.perm_coeff * mp.sigma_price * (self.target - remaining) / mp.adv
+        z = -(np.asarray(mid_move, float) - own) / (mp.sigma_price * np.sqrt(j / mp.n_intervals))
+        return np.clip(np.exp(np.clip(self.a * z, -50.0, 50.0)), self.m_min, self.m_max)
+
+    def shares(self, j, observed, remaining, params, mid_move=None):
+        if j == params.n_intervals - 1:
+            return remaining
+        d = self.nowcast.day_factor(observed) if self.adapt else np.ones(len(remaining))
+        mv = np.zeros(len(remaining)) if mid_move is None else mid_move
+        m = self.multiplier(j, mv, remaining)
+        z = np.sqrt(np.maximum(remaining, 0.0) * np.maximum(d, 1e-6)) * m
+        lz = np.log(np.clip(z, self._grid[0], self._grid[-1]))
+        w = np.clip(np.interp(lz, np.log(self._grid), self._w0[j]), 0.0, 1.0)
+        return remaining * w
 
 
 @dataclass
