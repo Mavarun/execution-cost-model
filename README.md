@@ -48,6 +48,7 @@ python scripts/run_cost_slice.py --json --out artifacts/cost_slice.json
 python scripts/run_execution_comparison.py          # calibration + schedule comparison tables
 python scripts/run_execution_comparison.py --json --out artifacts/execution.json
 python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-2/3 tables only (fast)
+python scripts/run_walk_forward_slice.py            # slice 5: walk-forward volume refit (~15 s)
 ```
 
 ## Layout
@@ -69,6 +70,8 @@ python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-
 - `src/execution_cost/adaptive.py` - re-optimising sqrt-law policy, nowcast POV
 - `src/execution_cost/adaptive_eval.py` - slice-4 harness (normal vs event days)
 - `scripts/run_adaptive_slice.py` - CLI for slice 4
+- `src/execution_cost/walk_forward.py` - slice-5 causal walk-forward refit across a regime break
+- `scripts/run_walk_forward_slice.py` - CLI for slice 5 (seed replication, controls)
 - `scripts/run_cost_slice.py` - CLI for baseline + cost curve
 - `scripts/run_execution_comparison.py` - CLI for the execution slice
 - `.github/workflows/tests.yml` - pytest CI (py3.11 / 3.12)
@@ -128,6 +131,47 @@ Reading:
 - POV is idealised: it sees current-interval volume without lag. *(Slice 3 adds an implementable lag-1 POV.)*
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
+
+## Slice 5 (2026-10-28): walk-forward refit of the volume model across a regime break
+
+Slice 4 fitted the profile, `k0` and the surge slope `phi` **once** on 500 training days, used **one seed triple**, and listed "no rolling refit across regimes" as a weakness. This slice tests a strictly causal refit and replicates it over 5 seed pairs.
+
+### What was added
+
+| Module | Content |
+|---|---|
+| `walk_forward.py` | Days arrive in 40 blocks of 50 (2,000 evaluation days). A break at block 10 switches the market. Each block has its own seed, so realised days never depend on a model. **FIXED** is fitted once on 500 pre-break days. **ROLLING(W)** (W = 100, 250) and **EXPANDING** refit profile, `k0` and `phi` before each block, on realised days only. All three drive the same implementable SURGE-POV (rate 1.25 q, q = 5% ADV) on common days. Spread (5 bps), sqrt temporary impact, linear permanent impact and opportunity cost of unfilled shares are charged. |
+| `scripts/run_walk_forward_slice.py` | 5 disjoint (training, evaluation) seed pairs. Scenarios: the main break (U-shape 1.5 -> 3.0 and surge days 15% -> 30%), a **no-break control**, a profile-only break and an events-only break. Writes `artifacts/walk_forward_slice.{json,md}`. |
+
+### Test design
+
+- Causality: a spy on the fitter shows every refit before block `b` sees exactly the `n_train + b x block` realised days (last `W` for ROLLING). The block's own days are never used.
+- Block volumes are identical whatever any model does, and the market switches exactly at the break.
+- A no-break control: EXPANDING stays within noise of FIXED. Costs are always charged and runs are reproducible.
+
+### Results (`python scripts/run_walk_forward_slice.py`; paired IS vs FIXED, bps, pooled over 5 seed pairs ± SE, all days out of sample)
+
+| scenario | ROLLING-100 post | ROLLING-250 post | EXPANDING post | post log RMSE FIXED / ROLLING-250 | ROLLING-250 pre |
+|---|---:|---:|---:|---:|---:|
+| profile + events break | **-0.77 ± 0.07** (5/5) | **-0.73 ± 0.06** (5/5) | -0.39 ± 0.03 (5/5) | 0.406 / 0.375 | -0.01 ± 0.01 |
+| profile-only break | **-0.81 ± 0.07** (5/5) | **-0.76 ± 0.07** (5/5) | -0.40 ± 0.03 (5/5) | 0.387 / 0.352 | -0.01 ± 0.01 |
+| events-only break | +0.04 ± 0.02 (2/5) | +0.03 ± 0.02 (1/5) | +0.01 ± 0.01 (1/5) | 0.371 / 0.372 | -0.01 ± 0.01 |
+| no break (control) | +0.02 ± 0.02 (1/5) | +0.01 ± 0.02 (1/5) | -0.00 ± 0.00 (2/5) | 0.347 / 0.348 | -0.01 ± 0.01 |
+
+(n/5 = seed pairs in which the refit is cheaper after the break.) Mean post-break IS of FIXED is 31.4 bps in the main scenario. ROLLING-250 brings it to 30.7, about the 30.7 bps FIXED pays with no break.
+
+Reading:
+- **Refitting pays when the intraday profile moves.** Rolling refits recover about 0.75 bps (about 2.4% of IS, 11-12 SE, 5 of 5 seed pairs) and cut forecast error 8-9%. EXPANDING recovers half of that, because pre-break days dilute it.
+- **It does not pay when only the surge rate moves.** Refitting `phi` on more surge days changes nothing measurable (+0.03 ± 0.02 bps), because the nowcast already learns a surge within the day.
+- **Refitting has a small noise cost when nothing changes**: +0.01-0.02 bps (within 1 SE), and a 100-day window is noisier than 250 (forecast RMSE 0.351 vs 0.349 pre-break).
+- Windows 100 vs 250 differ by under 0.05 bps after the break. Faster tracking is offset by noisier fits.
+
+### Weaknesses (honest)
+
+- Same simulator as slices 2-4: the break is parametric (a profile exponent and an event rate), and the planner's model has the simulator's form. Real regime changes (index events, half days, a new venue mix) are untested.
+- Only POV is walked forward. Static SQRT-OPT and ADAPTIVE also use `u_hat`, so they would gain from a refit too, but that is not measured here.
+- Windows are not chosen by any rule. W = 100 / 250 were fixed up front and both are reported. A change-point detector that refits only after a detected break is the next step.
+- 5 seed pairs share one impact calibration (seed 0), so calibration error is common to every arm and cancels in the paired differences, but not in absolute IS levels.
 
 ## Slice 4 (2026-10-17): adaptive re-optimisation, fitted volume nowcasts, event days
 
