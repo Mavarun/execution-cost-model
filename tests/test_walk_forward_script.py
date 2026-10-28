@@ -21,10 +21,17 @@ def test_cli_writes_all_scenarios(tmp_path):
     assert "## no break (control)" in md and "ROLLING-250 - FIXED" in md
 
 
+def _paired_row(md: str, scenario: str, pair: str) -> list[str]:
+    section = md.split(f"## {scenario}\n", 1)[1].split("\n## ", 1)[0]
+    row = next(line for line in section.splitlines() if line.startswith(f"| {pair} |"))
+    return [c.strip() for c in row.strip("|").split("|")]
+
+
 def test_committed_artifact_matches_the_readme():
-    art = json.loads((ROOT / "artifacts" / "walk_forward_slice.json").read_text())
-    main = art["scenarios"]["profile + events break"]["pairs"]["ROLLING-250 - FIXED"]["post"]
-    assert f"**{main['mean_bps']:+.2f} ± {main['se_bps']:.2f}** ({main['n_reps_better']}/5)" in \
-        (ROOT / "README.md").read_text()
-    ctrl = art["scenarios"]["no break (control)"]["pairs"]["ROLLING-250 - FIXED"]["post"]
-    assert abs(ctrl["mean_bps"]) < 2 * ctrl["se_bps"] + 0.01
+    # artifacts/*.json is gitignored in this repo, so the committed markdown is the record
+    md = (ROOT / "artifacts" / "walk_forward_slice.md").read_text()
+    _, _, post, better = _paired_row(md, "profile + events break", "ROLLING-250 - FIXED")
+    assert f"**{post}** ({better})" in (ROOT / "README.md").read_text()
+    _, _, ctrl, _ = _paired_row(md, "no break (control)", "ROLLING-250 - FIXED")
+    mean, se = (float(x) for x in ctrl.split(" ± "))
+    assert abs(mean) < 2 * se + 0.01
