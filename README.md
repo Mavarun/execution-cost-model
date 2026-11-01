@@ -191,9 +191,20 @@ Sensitivity (secondary, same seeds; PB - PARTIAL and BAND - PARTIAL in net Sharp
 Reading:
 - **Costs decide everything.** Trading to the target every day has gross Sharpe 1.44 and net -1.16 (11 bps/day of cost). Any walk-forward-tuned slow-down recovers net Sharpe ~1.0 at a cost of 0.5-0.9 bps/day.
 - **The no-trade band is not a free upgrade (H1 failed, H2 reversed).** A band is the optimum for *proportional* costs (the half-spread). Under the slice-1 model the total cost of a trade is `|dw| (c0 + c1 |dw| + c2 sqrt|dw|)`, superlinear in trade size because of slippage and sqrt impact, and superlinear costs reward splitting trades, which is what partial adjustment does (Garleanu-Pedersen). A pure band trades in lumps, carries a large tracking error to the target (mean |w| halves) and loses 0.10 Sharpe to partial adjustment. Adding partial adjustment inside the band only ties PARTIAL (+0.015, not significant). The band earns its keep only when trading is expensive relative to alpha decay: fast alpha (half-life 1.9 d, +0.15, 17/20) and doubled costs (+0.05, 14/20). Those are secondary cells, not a pre-registered claim.
-- **Mean P&L and Sharpe disagree, and Sharpe is the pre-registered metric.** The raw daily net-return gap WF-PB - WF-PARTIAL is -0.78 bps/day (Newey-West t -11.9) because WF-PB holds about 0.28 vs 0.39 of gross exposure; per unit of risk it is level.
+- **Mean P&L and Sharpe disagree, and Sharpe is the pre-registered metric.** The raw daily net-return gap WF-PB - WF-PARTIAL is -0.78 bps/day (Newey-West t -11.9) because WF-PB holds about 0.28 vs 0.39 of gross exposure; per unit of risk it is level (see the equal-risk check below).
 - **Full-sample tuning overstates only modestly here** (+0.05 Sharpe vs walk-forward), because the grid is smooth and the market is stationary. Note that the full-sample winner applied to the same OOS years scores 1.12 vs walk-forward's 1.02: that 0.10 is the look-ahead value of knowing the best setting.
 - **Deflation works on the null and is conservative on the real signal.** With IC 0 every seed's best of 42 has DSR < 0.95 (20/20) and walk-forward loses money (-0.11), so no fake edge. With IC 0.10 only 4/20 seeds reach DSR > 0.95 even though the true net Sharpe is about 1: 20 years of a 1-Sharpe strategy picked from 42 correlated trials is weak evidence under DSR, partly because the trial variance includes the clearly dominated FULL rule.
+
+### Post-hoc: equal realised risk (added after the pre-registered run)
+
+Sharpe is scale-free only if leverage is free, and here it is not: costs grow faster than linearly in trade size. `equal_risk_comparison` levers every position of the candidate by `k`, recomputes all costs on the levered trades, and bisects `k` until the candidate's OOS net-return std equals WF-PARTIAL's (on the evaluation days, as in slice 3's equal-risk frontier).
+
+| pair | mean leverage | net Sharpe diff at equal risk | p | seeds won | net P&L diff (bps/day) |
+|---|---|---|---|---|---|
+| WF-PB vs WF-PARTIAL | 1.43 | -0.021 ± 0.018 | 0.25 | 8 / 20 | -0.07 |
+| WF-BAND vs WF-PARTIAL | 2.19 | **-0.208 ± 0.042** | < 0.001 | 2 / 20 | -0.61 |
+
+At the same risk the band's small edge in unlevered Sharpe disappears (PB +0.015 -> -0.021), and the pure band falls further behind, because levering a lumpy trade path pays the superlinear impact. This confirms the H1 verdict: partial adjustment stays the recommended rule.
 
 ### Post-hoc: effective number of trials (added after the pre-registered run)
 
@@ -212,7 +223,7 @@ The two corrections bracket the truth. The raw count over-deflates, so a real 1-
 
 - Single synthetic asset; the cost model is slice 1's (participation in units of ADV, no fees, no borrow). Real alphas are not AR(1) with constant IC, so walk-forward never faces a regime break here.
 - The pre-registered DSR uses the raw count of 42 highly correlated trials and over-deflates; the post-hoc participation-ratio count (1.3) removes the penalty and admits the nominal 5% of null paths. A clustered trial count sits between them and is untested.
-- Selection is on net Sharpe only; a risk-matched (volatility-targeted) comparison of the rules is untested, so the P&L-vs-Sharpe gap above is reported, not resolved.
+- Selection is on unlevered net Sharpe. The equal-risk check levers ex post on the evaluation days; a walk-forward volatility target chosen on training data only is untested.
 - 20 seeds give ~0.02 SE on paired Sharpe differences; the favourable PB cells (fast alpha, high costs) are post-hoc sensitivities and would need their own pre-registration.
 
 ## Slice 4 (2026-10-17): adaptive re-optimisation, fitted volume nowcasts, event days
