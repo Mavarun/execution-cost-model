@@ -57,3 +57,24 @@ def test_zero_ic_is_a_null_market():
     path = simulate_alpha_path(AlphaParams(n=100_000, ic=0.0), seed=1)
     corr = np.corrcoef(path.target[1:], path.returns[1:])[0, 1]
     assert abs(corr) < 0.01
+
+
+def test_regime_path_switches_persistence_and_keeps_unit_variance():
+    from execution_cost.alpha import simulate_regime_path
+
+    a, b = AlphaParams(n=200_000, rho=0.97), AlphaParams(n=200_000, rho=0.70)
+    p = simulate_regime_path(a, b, switch_at=100_000, seed=2)
+    f = p.factor
+    assert np.corrcoef(f[1:100_000], f[:99_999])[0, 1] == pytest.approx(0.97, abs=0.01)
+    assert np.corrcoef(f[100_001:], f[100_000:-1])[0, 1] == pytest.approx(0.70, abs=0.01)
+    assert f[100_000:].var() == pytest.approx(1.0, rel=0.03)
+    np.testing.assert_allclose(p.target[1:], np.tanh(p.signal[:-1]))
+
+
+def test_regime_path_validates_inputs():
+    from execution_cost.alpha import simulate_regime_path
+
+    with pytest.raises(ValueError):
+        simulate_regime_path(AlphaParams(n=100), AlphaParams(n=200), switch_at=50)
+    with pytest.raises(ValueError):
+        simulate_regime_path(AlphaParams(n=100), AlphaParams(n=100), switch_at=100)

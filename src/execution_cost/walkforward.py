@@ -87,8 +87,15 @@ def walk_forward(
     min_train: int,
     test_len: int,
     runs: list[RuleRun] | None = None,
+    window: int | None = None,
 ) -> WalkForwardResult:
-    """Walk-forward selection over ``rules`` (see module docstring)."""
+    """Walk-forward selection over ``rules`` (see module docstring).
+
+    ``window=None`` scores on the expanding window ``[1, s_k)``; an integer
+    scores on the rolling window ``[max(1, s_k - window), s_k)``.
+    """
+    if window is not None and window < 2:
+        raise ValueError("window must be >= 2")
     if not rules:
         raise ValueError("need at least one rule")
     n = path.returns.size
@@ -98,7 +105,8 @@ def walk_forward(
     parts_w, parts_g, parts_c, parts_n, choices, all_scores = [], [], [], [], [], []
     for s in starts:
         e = min(s + test_len, n)
-        k, scores = select_on_window(runs, s)
+        lo = 1 if window is None else max(1, s - int(window))
+        k, scores = select_on_window(runs, s, start=lo)
         rule = runs[k].rule
         w = rule.positions(path.target[s:e], w0=w_held)
         g, c, nn = net_returns(path.returns[s:e], w, params, daily_vol=path.daily_vol[s:e], w0=w_held)

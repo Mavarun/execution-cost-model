@@ -90,3 +90,22 @@ def test_carried_position_is_charged_at_fold_boundaries(path):
     g, c, n = net_returns(path.returns[850:1100], res.weights[i0:i0 + 250], params,
                           daily_vol=path.daily_vol[850:1100], w0=w_prev)
     np.testing.assert_allclose(res.cost[i0:i0 + 250], c)
+
+
+def test_rolling_window_scores_only_the_last_window(path):
+    params = CostParams()
+    runs = run_rules(path, RULES, params)
+    res = walk_forward(path, RULES, params, min_train=600, test_len=250, runs=runs, window=300)
+    for s, label in zip(res.fold_starts, res.choices):
+        best = max(runs, key=lambda r: per_bar_sharpe(r.net[s - 300:s]))
+        assert best.rule.label == label
+    with pytest.raises(ValueError):
+        walk_forward(path, RULES, params, min_train=600, test_len=250, window=1)
+
+
+def test_rolling_window_longer_than_history_equals_expanding(path):
+    params = CostParams()
+    a = walk_forward(path, RULES, params, min_train=600, test_len=250)
+    b = walk_forward(path, RULES, params, min_train=600, test_len=250, window=10_000)
+    assert a.choices == b.choices
+    np.testing.assert_array_equal(a.net, b.net)
