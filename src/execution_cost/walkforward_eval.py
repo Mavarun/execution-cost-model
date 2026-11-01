@@ -107,6 +107,7 @@ def _summary(gross: np.ndarray, cost: np.ndarray, net: np.ndarray, weights: np.n
         "net_sharpe": annualized_sharpe(net),
         "mean_cost_bps": float(cost.mean() * 1e4),
         "turnover": float(np.mean(np.abs(trades_from_positions(weights)))),
+        "mean_abs_weight": float(np.mean(np.abs(weights))),
     }
 
 
