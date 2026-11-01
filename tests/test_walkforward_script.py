@@ -40,3 +40,11 @@ def test_readme_headline_numbers_match_the_committed_artifact():
     assert "Recommended family: **PARTIAL**" in md
     for row in ("| WF-PARTIAL | 1.34 | 1.02 (0.31)", "| WF-PB | 1.32 | 1.03 (0.29)", "| FULL | 1.44 | -1.16 (0.36)"):
         assert row in md
+
+
+def test_readme_post_hoc_effective_trials_match_the_artifact():
+    md = (ROOT / "artifacts" / "walkforward_slice.md").read_text()
+    readme = (ROOT / "README.md").read_text()
+    m = re.search(r"Effective trials .*?: (\d+\.\d+) on IC-0.10 seeds", md)
+    assert m and f"**{m.group(1)}** (IC 0.10)" in readme
+    assert "DSR > 0.95 on IC-0.10 seeds: 4/20 -> 20/20; null seeds with DSR < 0.95: 19/20" in md

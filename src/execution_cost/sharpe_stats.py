@@ -88,6 +88,24 @@ def deflated_sharpe(
     }
 
 
+def effective_trials(trial_returns: np.ndarray) -> float:
+    """Effective number of independent trials from their return correlations.
+
+    Participation ratio of the correlation-matrix eigenvalues,
+    ``(sum l)^2 / sum l^2``: ``N`` for uncorrelated trials, ``1`` for
+    perfectly correlated ones. ``trial_returns`` is ``(n_obs, n_trials)``.
+    """
+    x = np.asarray(trial_returns, dtype=float)
+    if x.ndim != 2 or x.shape[1] < 1:
+        raise ValueError("trial_returns must be (n_obs, n_trials)")
+    if x.shape[1] == 1:
+        return 1.0
+    keep = x.std(axis=0) > 0
+    corr = np.corrcoef(x[:, keep], rowvar=False)
+    lam = np.clip(np.linalg.eigvalsh(corr), 0.0, None)
+    return float(lam.sum() ** 2 / np.sum(lam**2))
+
+
 def hac_mean_test(diff: np.ndarray, *, maxlags: int = 5) -> dict[str, float]:
     """Mean of a daily return difference with a Newey-West (HAC) SE."""
     d = np.asarray(diff, dtype=float)

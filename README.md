@@ -71,7 +71,7 @@ python scripts/run_walkforward_slice.py             # slice 5: walk-forward reba
 - `src/execution_cost/adaptive_eval.py` - slice-4 harness (normal vs event days)
 - `src/execution_cost/alpha.py` - persistent AR(1) alpha market (slice 5)
 - `src/execution_cost/rebalance.py` - FULL / PARTIAL / no-trade BAND / PARTIAL+BAND rules
-- `src/execution_cost/sharpe_stats.py` - PSR, expected max Sharpe, deflated Sharpe, Newey-West
+- `src/execution_cost/sharpe_stats.py` - PSR, expected max Sharpe, deflated Sharpe, effective trials, Newey-West
 - `src/execution_cost/walkforward.py` - expanding-window rule selection, OOS stitching
 - `src/execution_cost/walkforward_eval.py` - slice-5 pre-registered protocol and harness
 - `scripts/run_walkforward_slice.py` - CLI for slice 5
@@ -195,10 +195,23 @@ Reading:
 - **Full-sample tuning overstates only modestly here** (+0.05 Sharpe vs walk-forward), because the grid is smooth and the market is stationary. Note that the full-sample winner applied to the same OOS years scores 1.12 vs walk-forward's 1.02: that 0.10 is the look-ahead value of knowing the best setting.
 - **Deflation works on the null and is conservative on the real signal.** With IC 0 every seed's best of 42 has DSR < 0.95 (20/20) and walk-forward loses money (-0.11), so no fake edge. With IC 0.10 only 4/20 seeds reach DSR > 0.95 even though the true net Sharpe is about 1: 20 years of a 1-Sharpe strategy picked from 42 correlated trials is weak evidence under DSR, partly because the trial variance includes the clearly dominated FULL rule.
 
+### Post-hoc: effective number of trials (added after the pre-registered run)
+
+The 42 rules are all smoothings of one signal, so their net returns are highly correlated. `sharpe_stats.effective_trials` takes the eigenvalue participation ratio of the trial correlation matrix, `(sum l)^2 / sum l^2`.
+
+| | N = 42 (pre-registered) | N_eff (post-hoc) |
+|---|---|---|
+| trials | 42 | **1.31** (IC 0.10), 1.32 (null) |
+| expected-max benchmark, annualised | 0.99 | 0.00 |
+| IC-0.10 seeds with DSR > 0.95 | 4 / 20 | 20 / 20 |
+| null seeds with DSR < 0.95 | 20 / 20 | 19 / 20 (null seed 615: 0.958) |
+
+The two corrections bracket the truth. The raw count over-deflates, so a real 1-Sharpe edge looks unproven on 16 of 20 paths. The participation ratio says the grid is about one bet; that removes the multiple-testing penalty, recognises every real path and lets 1 of 20 null paths through, which is the nominal 5% rate. Neither is the right answer for a grid whose trials are one dominant factor plus small differences. A clustering-based count is the next step.
+
 ### Weaknesses (honest)
 
 - Single synthetic asset; the cost model is slice 1's (participation in units of ADV, no fees, no borrow). Real alphas are not AR(1) with constant IC, so walk-forward never faces a regime break here.
-- DSR uses the raw count of 42 highly correlated trials and a cross-trial variance that includes FULL, so it over-deflates; an effective-trial count would be fairer.
+- The pre-registered DSR uses the raw count of 42 highly correlated trials and over-deflates; the post-hoc participation-ratio count (1.3) removes the penalty and admits the nominal 5% of null paths. A clustered trial count sits between them and is untested.
 - Selection is on net Sharpe only; a risk-matched (volatility-targeted) comparison of the rules is untested, so the P&L-vs-Sharpe gap above is reported, not resolved.
 - 20 seeds give ~0.02 SE on paired Sharpe differences; the favourable PB cells (fast alpha, high costs) are post-hoc sensitivities and would need their own pre-registration.
 

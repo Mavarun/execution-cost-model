@@ -35,6 +35,10 @@ Raw return differences, not risk-matched: selectors hold different gross exposur
 
 Full-sample best of 42: net Sharpe 1.08 in sample; the same rule on the OOS window 1.12; WF-ALL OOS 1.02. Null: in-sample best -0.01, WF-ALL OOS -0.11.
 
+## Post-hoc: deflating with the effective number of trials
+
+Effective trials (eigenvalue participation ratio of the 42 trial return series): 1.31 on IC-0.10 seeds, 1.32 on null seeds. Expected-max benchmark 0.99 (N = 42) -> 0.00 (N_eff), annualised. DSR > 0.95 on IC-0.10 seeds: 4/20 -> 20/20; null seeds with DSR < 0.95: 19/20.
+
 ## Sensitivity (secondary; same evaluation seeds)
 
 | setting | FULL | WF-PARTIAL | WF-BAND | WF-PB | WF-ALL | PB - PARTIAL | BAND - PARTIAL |
