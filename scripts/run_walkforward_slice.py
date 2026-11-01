@@ -25,6 +25,7 @@ from execution_cost.walkforward_eval import (  # noqa: E402
     SELECTORS,
     cost_params,
     decide,
+    equal_risk_comparison,
     null_market,
     paired_seed_test,
     pooled_hac,
@@ -76,6 +77,10 @@ def build(seeds, null_seeds, sens_seeds) -> dict:
             "eval_dsr_eff": [r.insample_best["dsr_eff"] for r in res],
             "null_dsr_eff": [r.insample_best["dsr_eff"] for r in null],
             "insample_best_labels": dict(Counter(r.insample_best["label"] for r in res)),
+        },
+        "equal_risk": {
+            f"{a} vs {b}": equal_risk_comparison(res, a, b)
+            for a, b in (("WF-PB", "WF-PARTIAL"), ("WF-BAND", "WF-PARTIAL"))
         },
         "choices_last_fold": {
             name: dict(Counter(r.choices[name][-1] for r in res)) for name in SELECTORS
@@ -131,6 +136,13 @@ def markdown(rep: dict) -> str:
     L.append(f"Full-sample best of 42: net Sharpe {io['insample_best_mean']:.2f} in sample; the same rule on the OOS "
              f"window {io['same_rule_on_oos_window_mean']:.2f}; WF-ALL OOS {io['wf_all_oos_mean']:.2f}. "
              f"Null: in-sample best {io['null_insample_best_mean']:.2f}, WF-ALL OOS {io['null_wf_all_oos_mean']:.2f}.\n")
+    L.append("## Post-hoc: equal realised risk (positions levered, costs recomputed)\n")
+    L.append("| pair | mean leverage | net Sharpe diff | p | wins | net P&L diff (bps/day) |")
+    L.append("|---|---|---|---|---|---|")
+    for k, v in rep["equal_risk"].items():
+        L.append(f"| {k} | {v['leverage_mean']:.2f} | {v['sharpe_diff']:+.3f} ± {v['sharpe_diff_se']:.3f} | "
+                 f"{v['p']:.3f} | {v['wins']}/{v['n']} | {v['pnl_diff_bps_per_day']:+.3f} |")
+    L.append("")
     thr = rep["protocol"]["dsr_threshold"]
     e_raw = sum(x > thr for x in io["eval_dsr"])
     e_eff = sum(x > thr for x in io["eval_dsr_eff"])

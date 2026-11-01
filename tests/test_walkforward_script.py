@@ -48,3 +48,13 @@ def test_readme_post_hoc_effective_trials_match_the_artifact():
     m = re.search(r"Effective trials .*?: (\d+\.\d+) on IC-0.10 seeds", md)
     assert m and f"**{m.group(1)}** (IC 0.10)" in readme
     assert "DSR > 0.95 on IC-0.10 seeds: 4/20 -> 20/20; null seeds with DSR < 0.95: 19/20" in md
+
+
+def test_readme_equal_risk_rows_match_the_artifact():
+    md = (ROOT / "artifacts" / "walkforward_slice.md").read_text()
+    readme = (ROOT / "README.md").read_text()
+    for pair in ("WF-PB vs WF-PARTIAL", "WF-BAND vs WF-PARTIAL"):
+        m = re.search(re.escape(pair) + r" \| (\d+\.\d+) \| ([+-]\d+\.\d+) ± (\d+\.\d+)", md)
+        assert m, pair
+        assert f"| {pair} | {m.group(1)} |" in readme
+        assert f"{m.group(2)} ± {m.group(3)}" in readme

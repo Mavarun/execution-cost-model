@@ -42,7 +42,7 @@ from scipy import stats
 from execution_cost.alpha import AlphaParams, simulate_alpha_path
 from execution_cost.costs import CostParams
 from execution_cost.metrics import annualized_sharpe
-from execution_cost.rebalance import Rule, trades_from_positions
+from execution_cost.rebalance import Rule, net_returns, trades_from_positions
 from execution_cost.sharpe_stats import (
     deflated_sharpe,
     effective_trials,
@@ -102,6 +102,10 @@ class SeedResult:
     seed: int
     oos: dict[str, dict[str, float]]
     oos_net: dict[str, np.ndarray]
+    oos_weights: dict[str, np.ndarray]
+    oos_returns: np.ndarray
+    oos_vol: np.ndarray
+    costs: CostParams
     choices: dict[str, list[str]]
     insample_best: dict[str, float]
 
@@ -134,16 +138,18 @@ def evaluate_seed(
     all_runs = run_rules(path, groups["WF-ALL"], costs)
     by_label = {r.rule.label: r for r in all_runs}
 
-    oos, oos_net, choices = {}, {}, {}
+    oos, oos_net, oos_w, choices = {}, {}, {}, {}
     for name in SELECTORS:
         runs = [by_label[r.label] for r in groups[name]]
         wf = walk_forward(path, groups[name], costs, min_train=min_train, test_len=test_len, runs=runs)
         oos[name] = _summary(wf.gross, wf.cost, wf.net, wf.weights)
         oos_net[name] = wf.net
+        oos_w[name] = wf.weights
         choices[name] = wf.choices
     full = fixed_rule_oos(by_label["FULL"], min_train)
     oos["FULL"] = _summary(full["gross"], full["cost"], full["net"], full["weights"])
     oos_net["FULL"] = full["net"]
+    oos_w["FULL"] = full["weights"]
 
     # Full-sample selection (the slice-1 practice) and its deflated Sharpe.
     trial_sr = np.array([per_bar_sharpe(r.net[1:]) for r in all_runs])
@@ -167,7 +173,74 @@ def evaluate_seed(
         "dsr_eff": dsr_eff["dsr"],
         "benchmark_eff_annual": dsr_eff["benchmark_annual"],
     }
-    return SeedResult(seed=seed, oos=oos, oos_net=oos_net, choices=choices, insample_best=insample)
+    return SeedResult(
+        seed=seed,
+        oos=oos,
+        oos_net=oos_net,
+        oos_weights=oos_w,
+        oos_returns=path.returns[min_train:],
+        oos_vol=path.daily_vol[min_train:],
+        costs=costs,
+        choices=choices,
+        insample_best=insample,
+    )
+
+
+def levered_net(r: SeedResult, name: str, k: float) -> np.ndarray:
+    """OOS net returns of selector ``name`` with every position scaled by ``k``.
+
+    Costs are recomputed on the scaled trades, so leverage pays the
+    superlinear slippage and impact terms; nothing is rescaled ex post.
+    """
+    w = k * r.oos_weights[name]
+    _, _, net = net_returns(r.oos_returns, w, r.costs, daily_vol=r.oos_vol)
+    return net
+
+
+def equal_risk_leverage(
+    r: SeedResult, name: str, target_std: float, *, lo: float = 0.05, hi: float = 20.0, tol: float = 1e-6
+) -> float:
+    """Leverage ``k`` at which ``name``'s OOS net-return std equals ``target_std``.
+
+    Post-hoc diagnostic (like slice 3's equal-risk frontier): ``k`` is solved
+    on the evaluation days themselves, so it answers "at the same realised
+    risk, which rule earns more after costs", not "which rule would a trader
+    pick".
+    """
+    f = lambda k: float(np.std(levered_net(r, name, k), ddof=1)) - target_std  # noqa: E731
+    if f(lo) > 0 or f(hi) < 0:
+        raise ValueError("target risk not bracketed")
+    a, b = lo, hi
+    while b - a > tol * max(1.0, a):
+        m = 0.5 * (a + b)
+        if f(m) > 0:
+            b = m
+        else:
+            a = m
+    return 0.5 * (a + b)
+
+
+def equal_risk_comparison(results: list[SeedResult], cand: str, base: str) -> dict[str, float]:
+    """Lever ``cand`` to ``base``'s realised OOS risk; paired net Sharpe and P&L gap."""
+    lev, d_sharpe, d_bps = [], [], []
+    for r in results:
+        target = float(np.std(r.oos_net[base], ddof=1))
+        k = equal_risk_leverage(r, cand, target)
+        net = levered_net(r, cand, k)
+        lev.append(k)
+        d_sharpe.append(annualized_sharpe(net) - annualized_sharpe(r.oos_net[base]))
+        d_bps.append(float((net.mean() - r.oos_net[base].mean()) * 1e4))
+    d = np.array(d_sharpe)
+    t = stats.ttest_1samp(d, 0.0)
+    return {
+        "leverage_mean": float(np.mean(lev)),
+        "sharpe_diff": float(d.mean()),
+        "sharpe_diff_se": float(d.std(ddof=1) / np.sqrt(d.size)),
+        "p": float(t.pvalue),
+        "wins": int((d > 0).sum()),
+        "n": int(d.size),
+        "pnl_diff_bps_per_day": float(np.mean(d_bps)),
+    }
 
 
 def paired_seed_test(a: np.ndarray, b: np.ndarray, *, alternative: str = "two-sided") -> dict[str, float]:

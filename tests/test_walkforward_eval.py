@@ -86,3 +86,26 @@ def test_decide_reports_every_hypothesis(two_seeds):
     d = decide(two_seeds + two_seeds, two_seeds)
     assert set(d) == {"H1", "H2", "H3", "H4", "recommended_family"}
     assert d["recommended_family"] in {"PARTIAL", "PARTIAL+BAND"}
+
+
+def test_levering_by_one_reproduces_the_oos_record(two_seeds):
+    from execution_cost.walkforward_eval import levered_net
+
+    r = two_seeds[0]
+    np.testing.assert_allclose(levered_net(r, "WF-PB", 1.0), r.oos_net["WF-PB"], atol=1e-15)
+
+
+def test_equal_risk_leverage_hits_the_target_and_pays_superlinear_costs(two_seeds):
+    from execution_cost.walkforward_eval import equal_risk_comparison, equal_risk_leverage, levered_net
+
+    r = two_seeds[0]
+    target = float(np.std(r.oos_net["WF-PARTIAL"], ddof=1))
+    k = equal_risk_leverage(r, "WF-BAND", target)
+    assert np.std(levered_net(r, "WF-BAND", k), ddof=1) == pytest.approx(target, rel=1e-4)
+    # Doubling positions more than doubles cost: net mean grows by less than 2x gross.
+    w = r.oos_weights["WF-PB"]
+    gross = (w * r.oos_returns).mean()
+    net1, net2 = levered_net(r, "WF-PB", 1.0).mean(), levered_net(r, "WF-PB", 2.0).mean()
+    assert (2 * gross - net2) > 2 * (gross - net1)
+    cmp = equal_risk_comparison(two_seeds, "WF-PB", "WF-PARTIAL")
+    assert cmp["n"] == 2 and cmp["leverage_mean"] > 0
