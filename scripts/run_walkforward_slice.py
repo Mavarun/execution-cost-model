@@ -69,6 +69,12 @@ def build(seeds, null_seeds, sens_seeds) -> dict:
             "null_wf_all_oos_mean": float(_ns(null, "WF-ALL").mean()),
             "eval_dsr": [r.insample_best["dsr"] for r in res],
             "null_dsr": [r.insample_best["dsr"] for r in null],
+            "n_eff_mean": float(np.mean([r.insample_best["n_eff"] for r in res])),
+            "null_n_eff_mean": float(np.mean([r.insample_best["n_eff"] for r in null])),
+            "benchmark_annual_mean": float(np.mean([r.insample_best["benchmark_annual"] for r in res])),
+            "benchmark_eff_annual_mean": float(np.mean([r.insample_best["benchmark_eff_annual"] for r in res])),
+            "eval_dsr_eff": [r.insample_best["dsr_eff"] for r in res],
+            "null_dsr_eff": [r.insample_best["dsr_eff"] for r in null],
             "insample_best_labels": dict(Counter(r.insample_best["label"] for r in res)),
         },
         "choices_last_fold": {
@@ -125,6 +131,16 @@ def markdown(rep: dict) -> str:
     L.append(f"Full-sample best of 42: net Sharpe {io['insample_best_mean']:.2f} in sample; the same rule on the OOS "
              f"window {io['same_rule_on_oos_window_mean']:.2f}; WF-ALL OOS {io['wf_all_oos_mean']:.2f}. "
              f"Null: in-sample best {io['null_insample_best_mean']:.2f}, WF-ALL OOS {io['null_wf_all_oos_mean']:.2f}.\n")
+    thr = rep["protocol"]["dsr_threshold"]
+    e_raw = sum(x > thr for x in io["eval_dsr"])
+    e_eff = sum(x > thr for x in io["eval_dsr_eff"])
+    z_eff = sum(x < thr for x in io["null_dsr_eff"])
+    L.append("## Post-hoc: deflating with the effective number of trials\n")
+    L.append(f"Effective trials (eigenvalue participation ratio of the 42 trial return series): "
+             f"{io['n_eff_mean']:.2f} on IC-0.10 seeds, {io['null_n_eff_mean']:.2f} on null seeds. "
+             f"Expected-max benchmark {io['benchmark_annual_mean']:.2f} (N = 42) -> {io['benchmark_eff_annual_mean']:.2f} "
+             f"(N_eff), annualised. DSR > {thr} on IC-0.10 seeds: {e_raw}/{len(io['eval_dsr'])} -> {e_eff}/"
+             f"{len(io['eval_dsr_eff'])}; null seeds with DSR < {thr}: {z_eff}/{len(io['null_dsr_eff'])}.\n")
     L.append("## Sensitivity (secondary; same evaluation seeds)\n")
     L.append("| setting | FULL | WF-PARTIAL | WF-BAND | WF-PB | WF-ALL | PB - PARTIAL | BAND - PARTIAL |")
     L.append("|---|---|---|---|---|---|---|---|")

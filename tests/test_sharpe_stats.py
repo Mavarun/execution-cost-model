@@ -73,3 +73,18 @@ def test_hac_mean_test_recovers_mean_and_widens_se_under_autocorrelation():
     assert iid["se"] == pytest.approx(1 / np.sqrt(20_000), rel=0.1)
     ma = np.convolve(e, np.ones(5), mode="same")
     assert hac_mean_test(ma, maxlags=10)["se"] > 1.8 * ma.std() / np.sqrt(ma.size)
+
+
+def test_effective_trials_bounds():
+    from execution_cost.sharpe_stats import effective_trials
+
+    rng = np.random.default_rng(4)
+    iid = rng.normal(size=(5000, 10))
+    assert effective_trials(iid) == pytest.approx(10, rel=0.03)
+    common = rng.normal(size=(5000, 1))
+    same = common + 1e-6 * rng.normal(size=(5000, 10))
+    assert effective_trials(same) == pytest.approx(1.0, abs=1e-3)
+    # two independent blocks of five near-identical trials -> about 2
+    blocks = np.hstack([np.repeat(rng.normal(size=(5000, 1)), 5, axis=1) + 1e-6 * rng.normal(size=(5000, 5)) for _ in range(2)])
+    assert effective_trials(blocks) == pytest.approx(2.0, rel=0.03)
+    assert effective_trials(iid[:, :1]) == 1.0

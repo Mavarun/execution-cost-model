@@ -43,7 +43,12 @@ from execution_cost.alpha import AlphaParams, simulate_alpha_path
 from execution_cost.costs import CostParams
 from execution_cost.metrics import annualized_sharpe
 from execution_cost.rebalance import Rule, trades_from_positions
-from execution_cost.sharpe_stats import deflated_sharpe, hac_mean_test, per_bar_sharpe
+from execution_cost.sharpe_stats import (
+    deflated_sharpe,
+    effective_trials,
+    hac_mean_test,
+    per_bar_sharpe,
+)
 from execution_cost.walkforward import fixed_rule_oos, run_rules, walk_forward
 
 PARTIAL_RATES = (0.5, 0.3, 0.2, 0.15, 0.1, 0.07, 0.05, 0.03)
@@ -144,6 +149,12 @@ def evaluate_seed(
     trial_sr = np.array([per_bar_sharpe(r.net[1:]) for r in all_runs])
     best = all_runs[int(np.nanargmax(trial_sr))]
     dsr = deflated_sharpe(best.net[1:], n_trials=len(all_runs), trial_var=float(np.nanvar(trial_sr, ddof=1)))
+    # Post-hoc (added after the pre-registered run): deflate with the
+    # effective number of trials instead of the raw 42 correlated ones.
+    n_eff = effective_trials(np.column_stack([r.net[1:] for r in all_runs]))
+    dsr_eff = deflated_sharpe(
+        best.net[1:], n_trials=max(int(round(n_eff)), 1), trial_var=float(np.nanvar(trial_sr, ddof=1))
+    )
     best_oos_part = annualized_sharpe(best.net[min_train:])
     insample = {
         "label": best.rule.label,
@@ -152,6 +163,9 @@ def evaluate_seed(
         "dsr": dsr["dsr"],
         "psr0": dsr["psr0"],
         "benchmark_annual": dsr["benchmark_annual"],
+        "n_eff": n_eff,
+        "dsr_eff": dsr_eff["dsr"],
+        "benchmark_eff_annual": dsr_eff["benchmark_annual"],
     }
     return SeedResult(seed=seed, oos=oos, oos_net=oos_net, choices=choices, insample_best=insample)
 
