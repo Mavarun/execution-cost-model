@@ -48,6 +48,7 @@ python scripts/run_cost_slice.py --json --out artifacts/cost_slice.json
 python scripts/run_execution_comparison.py          # calibration + schedule comparison tables
 python scripts/run_execution_comparison.py --json --out artifacts/execution.json
 python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-2/3 tables only (fast)
+python scripts/run_walkforward_slice.py             # slice 5: walk-forward rebalancing + deflated Sharpe (~10 s)
 ```
 
 ## Layout
@@ -68,6 +69,12 @@ python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-
 - `src/execution_cost/volume_model.py` - fitted profile, day-factor and surge nowcasts
 - `src/execution_cost/adaptive.py` - re-optimising sqrt-law policy, nowcast POV
 - `src/execution_cost/adaptive_eval.py` - slice-4 harness (normal vs event days)
+- `src/execution_cost/alpha.py` - persistent AR(1) alpha market (slice 5)
+- `src/execution_cost/rebalance.py` - FULL / PARTIAL / no-trade BAND / PARTIAL+BAND rules
+- `src/execution_cost/sharpe_stats.py` - PSR, expected max Sharpe, deflated Sharpe, Newey-West
+- `src/execution_cost/walkforward.py` - expanding-window rule selection, OOS stitching
+- `src/execution_cost/walkforward_eval.py` - slice-5 pre-registered protocol and harness
+- `scripts/run_walkforward_slice.py` - CLI for slice 5
 - `scripts/run_adaptive_slice.py` - CLI for slice 4
 - `scripts/run_cost_slice.py` - CLI for baseline + cost curve
 - `scripts/run_execution_comparison.py` - CLI for the execution slice
@@ -128,6 +135,72 @@ Reading:
 - POV is idealised: it sees current-interval volume without lag. *(Slice 3 adds an implementable lag-1 POV.)*
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
+
+## Slice 5 (2026-11-01): cost-aware rebalancing chosen walk-forward, with deflated Sharpe
+
+Slice 1 left two weaknesses at the portfolio level: the turnover knob was picked on **full-sample** Sharpe (no out-of-sample test, no multiple-testing correction), and its factor was i.i.d., so slowing down could only throw edge away. This slice asks a standard portfolio-construction question under the slice-1 cost model: **does a no-trade band beat plain partial adjustment once both are tuned walk-forward?**
+
+### What was added
+
+| Module | Content |
+|---|---|
+| `alpha.py` | AR(1) latent alpha (`rho` 0.90, half-life 6.6 days), IC 0.10 to the next return, noisy signal (noise sd 0.5), target position `tanh(signal)`, 1% daily vol, 20 years of daily bars. |
+| `rebalance.py` | `FULL`; `PARTIAL(a)` (`w += a (x - w)`, identical to slice 1's EWMA knob); `BAND(b)` (no trade inside `|x - w| <= b`, else trade to the nearest edge); `PARTIAL+BAND(a, b)` (close a fraction `a` of the excess beyond the band; nests both). Every rule's only state is the held position. Costs: the full slice-1 model (half-spread, linear slippage, sqrt impact on `|dw| / ADV`). |
+| `sharpe_stats.py` | Sharpe SE under skew / kurtosis, probabilistic Sharpe, expected max Sharpe of N trials, deflated Sharpe (Bailey & Lopez de Prado), Newey-West mean test (statsmodels). |
+| `walkforward.py` | Expanding window: 5 training years, then 15 annual folds; at each fold the rule with the best **training net Sharpe** trades the next year from the position actually held. |
+| `walkforward_eval.py` | The pre-registered protocol (grids, seeds, hypotheses, decision rules) frozen in `PROTOCOL` and committed before any evaluation seed was scored. 42 candidate rules; selectors WF-PARTIAL (baseline), WF-BAND, WF-PB, WF-ALL. |
+
+### Test design
+
+- Generator: AR(1) variance 1 and lag-1 autocorrelation `rho`; factor-to-next-return correlation equals IC; targets use only the previous signal; IC 0 is a null.
+- Rules: `PARTIAL` equals slice 1's EWMA; every trade of `BAND` lands on a band edge; wider bands trade strictly less; `PARTIAL+BAND` nests both; causality (changing later targets never changes earlier positions); a run split at any bar and continued from the held position equals one pass; cost accounting matches slice 1 exactly.
+- Statistics: Sharpe SE and expected max of 50 null trials match Monte Carlo (5% / 6%); DSR equals PSR for one trial; HAC SE widens under autocorrelation.
+- Walk-forward: folds cover exactly the bars after the training window; scrambling returns after a fold start cannot change that fold's choice; each choice is the training argmax; a one-rule walk-forward equals the fixed rule; costs at fold boundaries are charged from the held position.
+
+### Results (`python scripts/run_walkforward_slice.py`, 20 evaluation seeds x 3,780 OOS days)
+
+OOS means across seeds (annualised; cost in bps/day of capital):
+
+| selector | gross Sharpe | net Sharpe (sd across seeds) | cost | turnover | mean abs weight | null (IC 0) net Sharpe |
+|---|---|---|---|---|---|---|
+| FULL (trade to target) | 1.44 | **-1.16** (0.36) | 10.93 | 0.382 | 0.589 | -2.62 |
+| WF-PARTIAL (baseline) | 1.34 | 1.02 (0.31) | 0.94 | 0.069 | 0.388 | -0.11 |
+| WF-BAND | 1.26 | 0.92 (0.34) | 0.51 | 0.026 | 0.199 | -0.23 |
+| WF-PB | 1.32 | 1.03 (0.29) | 0.61 | 0.041 | 0.283 | -0.11 |
+| WF-ALL (all 42) | 1.31 | 1.02 (0.29) | 0.61 | 0.041 | 0.283 | -0.11 |
+
+Pre-registered hypotheses (paired across the 20 seeds):
+
+| | test | result | verdict |
+|---|---|---|---|
+| H1 (primary) | WF-PB > WF-PARTIAL net Sharpe, one-sided | +0.015 ± 0.018, p = 0.21, 11/20 seeds | **FAIL** - PARTIAL stays the recommended rule |
+| H2 | WF-BAND vs WF-PARTIAL, two-sided | **-0.096 ± 0.041**, p = 0.031, 4/20 | the band alone is *worse* |
+| H3 | full-sample best of 42 > WF-ALL OOS | +0.053 ± 0.028, p = 0.035 | pass, but small |
+| H4 | null: WF-ALL OOS <= 0 and DSR < 0.95 on >= 19/20 | WF-ALL -0.11 ± 0.05; DSR < 0.95 on 20/20 | pass |
+
+Sensitivity (secondary, same seeds; PB - PARTIAL and BAND - PARTIAL in net Sharpe, ± SE, seeds won):
+
+| setting | FULL | WF-PARTIAL | WF-PB | PB - PARTIAL | BAND - PARTIAL |
+|---|---|---|---|---|---|
+| costs x0.5 | 0.12 | 1.19 | 1.19 | -0.005 ± 0.011 (8/20) | -0.074 ± 0.027 (5/20) |
+| costs x2 | -3.50 | 0.77 | 0.83 | **+0.053 ± 0.022** (14/20) | +0.015 ± 0.030 (9/20) |
+| IC 0.05 | -1.84 | 0.39 | 0.41 | +0.020 ± 0.017 (10/20) | -0.021 ± 0.033 (7/20) |
+| rho 0.70 (half-life 1.9 d) | -2.15 | 0.53 | 0.68 | **+0.150 ± 0.032** (17/20) | +0.082 ± 0.044 (14/20) |
+| rho 0.97 (half-life 22.8 d) | -0.80 | 1.28 | 1.26 | -0.020 ± 0.017 (7/20) | -0.120 ± 0.036 (4/20) |
+
+Reading:
+- **Costs decide everything.** Trading to the target every day has gross Sharpe 1.44 and net -1.16 (11 bps/day of cost). Any walk-forward-tuned slow-down recovers net Sharpe ~1.0 at a cost of 0.5-0.9 bps/day.
+- **The no-trade band is not a free upgrade (H1 failed, H2 reversed).** A band is the optimum for *proportional* costs (the half-spread). Under the slice-1 model the total cost of a trade is `|dw| (c0 + c1 |dw| + c2 sqrt|dw|)`, superlinear in trade size because of slippage and sqrt impact, and superlinear costs reward splitting trades, which is what partial adjustment does (Garleanu-Pedersen). A pure band trades in lumps, carries a large tracking error to the target (mean |w| halves) and loses 0.10 Sharpe to partial adjustment. Adding partial adjustment inside the band only ties PARTIAL (+0.015, not significant). The band earns its keep only when trading is expensive relative to alpha decay: fast alpha (half-life 1.9 d, +0.15, 17/20) and doubled costs (+0.05, 14/20). Those are secondary cells, not a pre-registered claim.
+- **Mean P&L and Sharpe disagree, and Sharpe is the pre-registered metric.** The raw daily net-return gap WF-PB - WF-PARTIAL is -0.78 bps/day (Newey-West t -11.9) because WF-PB holds about 0.28 vs 0.39 of gross exposure; per unit of risk it is level.
+- **Full-sample tuning overstates only modestly here** (+0.05 Sharpe vs walk-forward), because the grid is smooth and the market is stationary. Note that the full-sample winner applied to the same OOS years scores 1.12 vs walk-forward's 1.02: that 0.10 is the look-ahead value of knowing the best setting.
+- **Deflation works on the null and is conservative on the real signal.** With IC 0 every seed's best of 42 has DSR < 0.95 (20/20) and walk-forward loses money (-0.11), so no fake edge. With IC 0.10 only 4/20 seeds reach DSR > 0.95 even though the true net Sharpe is about 1: 20 years of a 1-Sharpe strategy picked from 42 correlated trials is weak evidence under DSR, partly because the trial variance includes the clearly dominated FULL rule.
+
+### Weaknesses (honest)
+
+- Single synthetic asset; the cost model is slice 1's (participation in units of ADV, no fees, no borrow). Real alphas are not AR(1) with constant IC, so walk-forward never faces a regime break here.
+- DSR uses the raw count of 42 highly correlated trials and a cross-trial variance that includes FULL, so it over-deflates; an effective-trial count would be fairer.
+- Selection is on net Sharpe only; a risk-matched (volatility-targeted) comparison of the rules is untested, so the P&L-vs-Sharpe gap above is reported, not resolved.
+- 20 seeds give ~0.02 SE on paired Sharpe differences; the favourable PB cells (fast alpha, high costs) are post-hoc sensitivities and would need their own pre-registration.
 
 ## Slice 4 (2026-10-17): adaptive re-optimisation, fitted volume nowcasts, event days
 
@@ -266,7 +339,7 @@ Reading:
 - Impact is temporary in the PnL path (charged on trade) without permanent
   price trajectory feedback.
 - Single-name weight path; no multi-asset capacity or cross-impact.
-- Sharpe uses full-sample stats (no purged CV / deflated Sharpe).
+- Sharpe uses full-sample stats (no purged CV / deflated Sharpe). *(Slice 5 adds walk-forward selection and the deflated Sharpe.)*
 
 ## References
 
