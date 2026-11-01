@@ -137,12 +137,12 @@ def markdown(rep: dict) -> str:
     return "\n".join(L) + "\n"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--seeds", type=int, default=None, help="use only the first N seeds of each set (smoke runs)")
     p.add_argument("--out-dir", type=Path, default=ROOT / "artifacts")
     p.add_argument("--json", action="store_true")
-    a = p.parse_args()
+    a = p.parse_args(argv)
     k = a.seeds
     seeds = PROTOCOL["eval_seeds"][:k] if k else PROTOCOL["eval_seeds"]
     null_seeds = PROTOCOL["null_seeds"][:k] if k else PROTOCOL["null_seeds"]
