@@ -25,6 +25,7 @@ def test_walkforward_script_small(tmp_path, capsys):
     assert set(rep["table"]) == {"WF-PARTIAL", "WF-BAND", "WF-PB", "WF-ALL", "FULL"}
     assert set(rep["decision"]) == {"H1", "H2", "H3", "H4", "recommended_family"}
     assert len(rep["sensitivity"]) == 5
+    assert rep["regime"]["seeds"] == [700, 701] and "H5" in rep["regime"]
     md = (tmp_path / "walkforward_slice.md").read_text()
     assert "Pre-registered hypotheses" in md and "Selection bias" in md
     assert "Slice 5" in capsys.readouterr().out
@@ -58,3 +59,12 @@ def test_readme_equal_risk_rows_match_the_artifact():
         assert m, pair
         assert f"| {pair} | {m.group(1)} |" in readme
         assert f"{m.group(2)} ± {m.group(3)}" in readme
+
+
+def test_readme_regime_rows_match_the_artifact():
+    md = (ROOT / "artifacts" / "walkforward_slice.md").read_text()
+    readme = (ROOT / "README.md").read_text()
+    m = re.search(r"\| break \| (\d+\.\d+) \| (\d+\.\d+) \| ([+-]\d+\.\d+) ± (\d+\.\d+)", md)
+    assert m
+    assert f"| break | {m.group(1)} | {m.group(2)} | {m.group(3)} ± {m.group(4)} |" in readme
+    assert "H5 -> FAIL" in md and "**H5 fails.**" in readme
