@@ -48,7 +48,7 @@ python scripts/run_cost_slice.py --json --out artifacts/cost_slice.json
 python scripts/run_execution_comparison.py          # calibration + schedule comparison tables
 python scripts/run_execution_comparison.py --json --out artifacts/execution.json
 python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-2/3 tables only (fast)
-python scripts/run_walkforward_slice.py             # slice 5: walk-forward rebalancing + deflated Sharpe (~10 s)
+python scripts/run_walkforward_slice.py             # slice 5: walk-forward rebalancing, deflated Sharpe, regime break (~12 s)
 ```
 
 ## Layout
@@ -195,6 +195,17 @@ Reading:
 - **Full-sample tuning overstates only modestly here** (+0.05 Sharpe vs walk-forward), because the grid is smooth and the market is stationary. Note that the full-sample winner applied to the same OOS years scores 1.12 vs walk-forward's 1.02: that 0.10 is the look-ahead value of knowing the best setting.
 - **Deflation works on the null and is conservative on the real signal.** With IC 0 every seed's best of 42 has DSR < 0.95 (20/20) and walk-forward loses money (-0.11), so no fake edge. With IC 0.10 only 4/20 seeds reach DSR > 0.95 even though the true net Sharpe is about 1: 20 years of a 1-Sharpe strategy picked from 42 correlated trials is weak evidence under DSR, partly because the trial variance includes the clearly dominated FULL rule.
 
+### H5: regime break, rolling vs expanding window (pre-registered after H1-H4, before any regime seed)
+
+The alpha half-life drops from 22.8 to 1.9 days (rho 0.97 -> 0.70) at bar 2,520, half-way through the OOS years. WF-ALL selects either on the expanding window or on a rolling 3-year window; scored on the post-break bars, seeds 700-719.
+
+| market | expanding | rolling 3y | rolling - expanding | p | seeds won |
+|---|---|---|---|---|---|
+| break | 0.50 | 0.48 | -0.016 ± 0.037 | 0.66 (one-sided) | 10 / 20 |
+| no break (control, rho 0.90) | 0.95 | 0.84 | **-0.117 ± 0.049** | 0.027 | 7 / 20 |
+
+**H5 fails.** Even with a real break, forgetting the old regime does not pay: post-break net Sharpe roughly halves (about 1.0 before the break -> 0.5 after) whichever window is used, and with no break the rolling window costs 0.12 Sharpe (noisier selection on 3 years). In the last fold the rolling window does move toward slower, wider rules (PARTIAL+BAND a = 0.1, b = 0.7 on 7 / 20 seeds), but the net Sharpe surface over the grid is flat enough that the switch earns nothing. The default stays expanding.
+
 ### Post-hoc: equal realised risk (added after the pre-registered run)
 
 Sharpe is scale-free only if leverage is free, and here it is not: costs grow faster than linearly in trade size. `equal_risk_comparison` levers every position of the candidate by `k`, recomputes all costs on the levered trades, and bisects `k` until the candidate's OOS net-return std equals WF-PARTIAL's (on the evaluation days, as in slice 3's equal-risk frontier).
@@ -221,7 +232,7 @@ The two corrections bracket the truth. The raw count over-deflates, so a real 1-
 
 ### Weaknesses (honest)
 
-- Single synthetic asset; the cost model is slice 1's (participation in units of ADV, no fees, no borrow). Real alphas are not AR(1) with constant IC, so walk-forward never faces a regime break here.
+- Single synthetic asset; the cost model is slice 1's (participation in units of ADV, no fees, no borrow). Only one kind of regime break was tested (a persistence drop at known size). An IC decay to zero, which is the break that matters most for live alphas, is untested.
 - The pre-registered DSR uses the raw count of 42 highly correlated trials and over-deflates; the post-hoc participation-ratio count (1.3) removes the penalty and admits the nominal 5% of null paths. A clustered trial count sits between them and is untested.
 - Selection is on unlevered net Sharpe. The equal-risk check levers ex post on the evaluation days; a walk-forward volatility target chosen on training data only is untested.
 - 20 seeds give ~0.02 SE on paired Sharpe differences; the favourable PB cells (fast alpha, high costs) are post-hoc sensitivities and would need their own pre-registration.

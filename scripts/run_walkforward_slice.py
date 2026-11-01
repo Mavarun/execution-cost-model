@@ -29,6 +29,7 @@ from execution_cost.walkforward_eval import (  # noqa: E402
     null_market,
     paired_seed_test,
     pooled_hac,
+    run_regime_study,
     run_study,
     table,
 )
@@ -47,7 +48,7 @@ def _ns(results, name):
     return np.array([r.oos[name]["net_sharpe"] for r in results])
 
 
-def build(seeds, null_seeds, sens_seeds) -> dict:
+def build(seeds, null_seeds, sens_seeds, regime_seeds=None) -> dict:
     base = AlphaParams(**PROTOCOL["market"])
     res = run_study(seeds)
     null = run_study(null_seeds, market=null_market())
@@ -87,6 +88,7 @@ def build(seeds, null_seeds, sens_seeds) -> dict:
         },
         "sensitivity": {},
     }
+    out["regime"] = run_regime_study(regime_seeds)
     for label, spec in SENSITIVITIES.items():
         market = replace(base, **{k: v for k, v in spec.items() if k in ("ic", "rho")})
         costs = cost_params(spec.get("cost_scale", 1.0))
@@ -153,6 +155,17 @@ def markdown(rep: dict) -> str:
              f"Expected-max benchmark {io['benchmark_annual_mean']:.2f} (N = 42) -> {io['benchmark_eff_annual_mean']:.2f} "
              f"(N_eff), annualised. DSR > {thr} on IC-0.10 seeds: {e_raw}/{len(io['eval_dsr'])} -> {e_eff}/"
              f"{len(io['eval_dsr_eff'])}; null seeds with DSR < {thr}: {z_eff}/{len(io['null_dsr_eff'])}.\n")
+    g = rep["regime"]
+    h5, c = g["H5"], g["control_test"]
+    L.append("## H5: regime break (rho 0.97 -> 0.70 at bar 2,520), WF-ALL, post-break OOS net Sharpe\n")
+    L.append("| market | expanding | rolling 3y | rolling - expanding | p | wins |")
+    L.append("|---|---|---|---|---|---|")
+    L.append(f"| break | {g['break']['expanding']:.2f} | {g['break']['rolling']:.2f} | {h5['mean']:+.3f} ± {h5['se']:.3f} | "
+             f"{h5['p']:.3f} (one-sided) | {h5['wins']}/{h5['n']} |")
+    L.append(f"| no break (control) | {g['control']['expanding']:.2f} | {g['control']['rolling']:.2f} | "
+             f"{c['mean']:+.3f} ± {c['se']:.3f} | {c['p']:.3f} | {c['wins']}/{c['n']} |")
+    L.append(f"\nPre-break OOS bars (break market): expanding {g['break']['expanding_pre']:.2f}, rolling {g['break']['rolling_pre']:.2f}. "
+             f"H5 -> {'PASS' if h5['pass'] else 'FAIL'}\n")
     L.append("## Sensitivity (secondary; same evaluation seeds)\n")
     L.append("| setting | FULL | WF-PARTIAL | WF-BAND | WF-PB | WF-ALL | PB - PARTIAL | BAND - PARTIAL |")
     L.append("|---|---|---|---|---|---|---|---|")
@@ -174,7 +187,10 @@ def main(argv: list[str] | None = None) -> int:
     k = a.seeds
     seeds = PROTOCOL["eval_seeds"][:k] if k else PROTOCOL["eval_seeds"]
     null_seeds = PROTOCOL["null_seeds"][:k] if k else PROTOCOL["null_seeds"]
-    rep = build(seeds, null_seeds, seeds)
+    from execution_cost.walkforward_eval import REGIME_PROTOCOL
+
+    regime_seeds = REGIME_PROTOCOL["seeds"][:k] if k else REGIME_PROTOCOL["seeds"]
+    rep = build(seeds, null_seeds, seeds, regime_seeds)
     a.out_dir.mkdir(parents=True, exist_ok=True)
     (a.out_dir / "walkforward_slice.json").write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
     md = markdown(rep)

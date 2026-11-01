@@ -46,6 +46,15 @@ Full-sample best of 42: net Sharpe 1.08 in sample; the same rule on the OOS wind
 
 Effective trials (eigenvalue participation ratio of the 42 trial return series): 1.31 on IC-0.10 seeds, 1.32 on null seeds. Expected-max benchmark 0.99 (N = 42) -> 0.00 (N_eff), annualised. DSR > 0.95 on IC-0.10 seeds: 4/20 -> 20/20; null seeds with DSR < 0.95: 19/20.
 
+## H5: regime break (rho 0.97 -> 0.70 at bar 2,520), WF-ALL, post-break OOS net Sharpe
+
+| market | expanding | rolling 3y | rolling - expanding | p | wins |
+|---|---|---|---|---|---|
+| break | 0.50 | 0.48 | -0.016 ± 0.037 | 0.662 (one-sided) | 10/20 |
+| no break (control) | 0.95 | 0.84 | -0.117 ± 0.049 | 0.027 | 7/20 |
+
+Pre-break OOS bars (break market): expanding 1.05, rolling 1.00. H5 -> FAIL
+
 ## Sensitivity (secondary; same evaluation seeds)
 
 | setting | FULL | WF-PARTIAL | WF-BAND | WF-PB | WF-ALL | PB - PARTIAL | BAND - PARTIAL |
