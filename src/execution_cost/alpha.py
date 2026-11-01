@@ -101,3 +101,44 @@ def simulate_alpha_path(params: AlphaParams | None = None, *, seed: int = 0) -> 
         params=p,
         seed=int(seed),
     )
+
+
+def simulate_regime_path(
+    before: AlphaParams, after: AlphaParams, *, switch_at: int, seed: int = 0
+) -> AlphaPath:
+    """A path whose alpha persistence / IC change at bar ``switch_at``.
+
+    The factor keeps unit variance across the break: from ``switch_at`` on it
+    follows ``after.rho``. Returns from bar ``switch_at + 1`` load on the
+    factor with ``after.ic``. ``n``, ``noise_sd`` and ``asset_vol`` come from
+    ``before`` and must match ``after``.
+    """
+    if (before.n, before.noise_sd, before.asset_vol) != (after.n, after.noise_sd, after.asset_vol):
+        raise ValueError("only rho and ic may change at the break")
+    if not 1 <= switch_at < before.n:
+        raise ValueError("switch_at must lie inside the path")
+    n = before.n
+    rng = np.random.default_rng(seed)
+    shocks = rng.normal(0.0, 1.0, size=n)
+    eps = rng.normal(0.0, 1.0, size=n)
+    noise = rng.normal(0.0, 1.0, size=n)
+    rho = np.where(np.arange(n) < switch_at, before.rho, after.rho)
+    factor = np.empty(n)
+    factor[0] = shocks[0]
+    for t in range(1, n):
+        factor[t] = rho[t] * factor[t - 1] + np.sqrt(1.0 - rho[t] ** 2) * shocks[t]
+    signal = factor + before.noise_sd * noise
+    ic = np.where(np.arange(n) <= switch_at, before.ic, after.ic)
+    returns = np.zeros(n)
+    returns[1:] = before.asset_vol * (ic[1:] * factor[:-1] + np.sqrt(1.0 - ic[1:] ** 2) * eps[1:])
+    target = np.zeros(n)
+    target[1:] = np.tanh(signal[:-1])
+    return AlphaPath(
+        returns=returns,
+        target=target,
+        factor=factor,
+        signal=signal,
+        daily_vol=np.full(n, before.asset_vol),
+        params=after,
+        seed=int(seed),
+    )

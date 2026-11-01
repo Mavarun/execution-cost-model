@@ -109,3 +109,21 @@ def test_equal_risk_leverage_hits_the_target_and_pays_superlinear_costs(two_seed
     assert (2 * gross - net2) > 2 * (gross - net1)
     cmp = equal_risk_comparison(two_seeds, "WF-PB", "WF-PARTIAL")
     assert cmp["n"] == 2 and cmp["leverage_mean"] > 0
+
+
+def test_regime_protocol_is_frozen_and_disjoint():
+    from execution_cost.walkforward_eval import REGIME_PROTOCOL
+
+    rp = REGIME_PROTOCOL
+    assert rp["seeds"] == tuple(range(700, 720))
+    assert not set(rp["seeds"]) & (set(PROTOCOL["eval_seeds"]) | set(PROTOCOL["null_seeds"]))
+    assert (rp["before"], rp["after"]) == ({"rho": 0.97, "ic": 0.10}, {"rho": 0.70, "ic": 0.10})
+    assert rp["switch_at"] == 2520 and rp["rolling_window"] == 756 and rp["selector"] == "WF-ALL"
+
+
+def test_regime_study_plumbing_small():
+    from execution_cost.walkforward_eval import run_regime_study
+
+    rep = run_regime_study(seeds=(1, 2), n=1200, switch_at=800, min_train=400, test_len=200, window=300)
+    assert set(rep) >= {"H5", "control_test", "break", "control"}
+    assert rep["H5"]["n"] == 2 and len(rep["last_fold_choices"]["rolling"]) == 2

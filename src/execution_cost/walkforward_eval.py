@@ -30,6 +30,20 @@ cost level and grids are in a sensible range):
 
 Secondary sensitivities (cost x0.5 / x2, IC 0.05, rho 0.7 / 0.97) reuse the
 evaluation seeds and do not change the decision.
+
+Regime-break extension (H5, frozen in :data:`REGIME_PROTOCOL` after H1-H4
+were scored and before any regime seed was run): the alpha's half-life
+drops from 22.8 to 1.9 days (rho 0.97 -> 0.70) at bar 2,520, mid-way through
+the OOS years. The slow-alpha regime favours slow PARTIAL rules and the fast
+one favours PARTIAL+BAND (sensitivity table), so the best rule changes.
+
+* H5 (one-sided, paired over seeds 700-719): WF-ALL with a **rolling
+  3-year** training window beats the expanding window on OOS net Sharpe
+  over the post-break bars ``[2520, 5040)``.
+* Control (two-sided, same seeds, no break, rho 0.90): rolling vs expanding
+  over the same bars; a cost of the shorter window is expected.
+* Decision: if H5 passes, the README recommends a rolling window when a
+  regime change is suspected; the default stays expanding either way.
 """
 
 from __future__ import annotations
@@ -72,6 +86,16 @@ PROTOCOL = {
 }
 
 SELECTORS = ("WF-PARTIAL", "WF-BAND", "WF-PB", "WF-ALL")
+
+REGIME_PROTOCOL = {
+    "before": {"rho": 0.97, "ic": 0.10},
+    "after": {"rho": 0.70, "ic": 0.10},
+    "switch_at": 2520,
+    "rolling_window": 756,
+    "seeds": tuple(range(700, 720)),
+    "selector": "WF-ALL",
+    "alpha_level": 0.05,
+}
 
 
 def candidate_rules() -> dict[str, list[Rule]]:
@@ -317,3 +341,64 @@ def decide(results: list[SeedResult], null_results: list[SeedResult]) -> dict:
 
 def null_market() -> AlphaParams:
     return replace(AlphaParams(**PROTOCOL["market"]), ic=0.0)
+
+
+def regime_compare(seed: int, *, break_: bool = True, n: int | None = None, switch_at: int | None = None,
+                   min_train: int | None = None, test_len: int | None = None,
+                   window: int | None = None) -> dict[str, float]:
+    """Expanding vs rolling WF-ALL on one path, scored on the post-switch bars."""
+    from execution_cost.alpha import simulate_regime_path
+
+    rp = REGIME_PROTOCOL
+    base = AlphaParams(**PROTOCOL["market"])
+    if n is not None:
+        base = replace(base, n=int(n))
+    sw = int(switch_at if switch_at is not None else rp["switch_at"])
+    min_train = int(min_train or PROTOCOL["min_train"])
+    test_len = int(test_len or PROTOCOL["test_len"])
+    window = int(window or rp["rolling_window"])
+    if break_:
+        path = simulate_regime_path(replace(base, **rp["before"]), replace(base, **rp["after"]), switch_at=sw, seed=seed)
+    else:
+        path = simulate_alpha_path(base, seed=seed)
+    costs = cost_params()
+    rules = candidate_rules()[rp["selector"]]
+    runs = run_rules(path, rules, costs)
+    out = {}
+    for name, win in (("expanding", None), ("rolling", window)):
+        wf = walk_forward(path, rules, costs, min_train=min_train, test_len=test_len, runs=runs, window=win)
+        post = wf.oos_index >= sw
+        out[f"{name}_net_sharpe"] = annualized_sharpe(wf.net[post])
+        out[f"{name}_pre_net_sharpe"] = annualized_sharpe(wf.net[~post]) if (~post).sum() > 1 else float("nan")
+        out[f"{name}_choices"] = wf.choices
+    return out
+
+
+def run_regime_study(seeds=None, **kw) -> dict:
+    """H5 and its no-break control over the pre-registered seeds."""
+    seeds = tuple(seeds if seeds is not None else REGIME_PROTOCOL["seeds"])
+    brk = [regime_compare(s, break_=True, **kw) for s in seeds]
+    ctl = [regime_compare(s, break_=False, **kw) for s in seeds]
+    def arr(rows, key):
+        return np.array([r[key] for r in rows])
+    h5 = paired_seed_test(arr(brk, "rolling_net_sharpe"), arr(brk, "expanding_net_sharpe"), alternative="greater")
+    control = paired_seed_test(arr(ctl, "rolling_net_sharpe"), arr(ctl, "expanding_net_sharpe"))
+    return {
+        "seeds": list(seeds),
+        "break": {
+            "expanding": float(arr(brk, "expanding_net_sharpe").mean()),
+            "rolling": float(arr(brk, "rolling_net_sharpe").mean()),
+            "expanding_pre": float(np.nanmean(arr(brk, "expanding_pre_net_sharpe"))),
+            "rolling_pre": float(np.nanmean(arr(brk, "rolling_pre_net_sharpe"))),
+        },
+        "control": {
+            "expanding": float(arr(ctl, "expanding_net_sharpe").mean()),
+            "rolling": float(arr(ctl, "rolling_net_sharpe").mean()),
+        },
+        "H5": {**h5, "pass": bool(h5["p"] < REGIME_PROTOCOL["alpha_level"] and h5["mean"] > 0)},
+        "control_test": control,
+        "last_fold_choices": {
+            "expanding": [r["expanding_choices"][-1] for r in brk],
+            "rolling": [r["rolling_choices"][-1] for r in brk],
+        },
+    }
