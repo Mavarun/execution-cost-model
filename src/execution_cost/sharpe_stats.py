@@ -116,3 +116,26 @@ def hac_mean_test(diff: np.ndarray, *, maxlags: int = 5) -> dict[str, float]:
         "t": float(res.tvalues[0]),
         "p": float(res.pvalues[0]),
     }
+
+
+def clustered_trials(trial_returns: np.ndarray, *, max_distance: float = 0.5) -> int:
+    """Number of trial clusters under average-linkage on ``1 - corr`` (slice 6).
+
+    Between the raw count (over-deflates correlated grids) and the participation
+    ratio (one dominant factor reads as ~1 trial): trials whose average pairwise
+    correlation is at least ``1 - max_distance`` count as one. Constant trials are
+    dropped; a single trial is one cluster.
+    """
+    from scipy.cluster.hierarchy import fcluster, linkage
+    from scipy.spatial.distance import squareform
+
+    x = np.asarray(trial_returns, dtype=float)
+    if x.ndim != 2 or x.shape[1] < 1:
+        raise ValueError("trial_returns must be (n_obs, n_trials)")
+    x = x[:, x.std(axis=0) > 0]
+    if x.shape[1] <= 1:
+        return 1
+    dist = np.clip(1.0 - np.corrcoef(x, rowvar=False), 0.0, 2.0)
+    np.fill_diagonal(dist, 0.0)
+    z = linkage(squareform(dist, checks=False), method="average")
+    return int(fcluster(z, t=max_distance, criterion="distance").max())

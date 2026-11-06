@@ -88,3 +88,17 @@ def test_effective_trials_bounds():
     blocks = np.hstack([np.repeat(rng.normal(size=(5000, 1)), 5, axis=1) + 1e-6 * rng.normal(size=(5000, 5)) for _ in range(2)])
     assert effective_trials(blocks) == pytest.approx(2.0, rel=0.03)
     assert effective_trials(iid[:, :1]) == 1.0
+
+
+def test_clustered_trials_counts_blocks():
+    from execution_cost.sharpe_stats import clustered_trials
+
+    rng = np.random.default_rng(0)
+    base = rng.normal(size=(2000, 3))
+    # three independent blocks of four near-copies each
+    x = np.column_stack([base[:, j] + 0.1 * rng.normal(size=2000) for j in range(3) for _ in range(4)])
+    assert clustered_trials(x) == 3
+    assert clustered_trials(rng.normal(size=(2000, 6))) == 6
+    assert clustered_trials(np.column_stack([base[:, 0], np.zeros(2000)])) == 1
+    with pytest.raises(ValueError):
+        clustered_trials(np.zeros(5))
