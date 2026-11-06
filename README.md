@@ -49,6 +49,9 @@ python scripts/run_execution_comparison.py          # calibration + schedule com
 python scripts/run_execution_comparison.py --json --out artifacts/execution.json
 python scripts/run_execution_comparison.py --no-frontier --no-misspec   # slice-2/3 tables only (fast)
 python scripts/run_walkforward_slice.py             # slice 5: walk-forward rebalancing, deflated Sharpe, regime break (~12 s)
+python scripts/run_decay_slice.py                   # slice 6 H6: trailing-performance gate under an IC decay (~2 s)
+python scripts/run_vol_target_slice.py              # slice 6 H7: train-chosen vol targeting, band vs partial (~4 s)
+python scripts/run_clustered_dsr.py                 # slice 6: clustered trial count for the deflated Sharpe (~5 s)
 ```
 
 ## Layout
@@ -135,6 +138,59 @@ Reading:
 - POV is idealised: it sees current-interval volume without lag. *(Slice 3 adds an implementable lag-1 POV.)*
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
+
+## Slice 6 (2026-11-06): an alpha that dies, train-chosen equal risk, clustered trial count
+
+Slice 5 left three weaknesses: an **IC decay to zero** was untested, its equal-risk check levered **on the evaluation days**, and the right **trial count** for the deflated Sharpe sat somewhere between 42 and 1.3. Each test below was frozen in code (`DECAY_PROTOCOL`, `VT_PROTOCOL`, `clustered_dsr.MAX_DISTANCE`) and committed before its seeds were run. All three come back negative or null, and nothing in the recommended rule changes.
+
+### What was added
+
+| Module | Content |
+|---|---|
+| `decay_gate.py` | Causal overlay on a walk-forward record: flat when the trailing mean of the **shadow** (ungated) net return over `lookback` bars is negative. The chosen rule trades toward the gated target, so exits and re-entries pay the full cost model. |
+| `decay_eval.py` | H6: IC 0.10 -> 0 at bar 2,520 (rho unchanged), WF-PARTIAL, gates G252 (primary), G126, G504; seeds 800-819 plus a no-decay control. |
+| `vol_target.py`, `vol_target_eval.py` | H7: every fold's leverage solved on its own training window to 10% annualised net vol (costs re-charged on levered trades); WF-PB vs WF-PARTIAL on fresh seeds 900-919. |
+| `sharpe_stats.clustered_trials`, `clustered_dsr.py` | Average-linkage clusters on `1 - corr`, cut at 0.5; DSR on slice 5's seeds. |
+
+### H6: a trailing-performance gate does not save a dying alpha (`artifacts/decay_slice.md`)
+
+Post-decay bars `[2520, 5040)`, means over 20 seeds (bps/day of capital):
+
+| arm | decay: post net | decay: post cost | decay: share on | control: OOS net Sharpe |
+|---|---|---|---|---|
+| ungated WF-PARTIAL | -0.269 | 0.567 | 1.000 | 1.058 |
+| G252 (primary) | -0.377 | 0.295 | 0.501 | 0.955 |
+| G126 | -0.221 | 0.295 | 0.486 | 0.925 |
+| G504 | -0.275 | 0.280 | 0.497 | 1.025 |
+
+**H6 fails**: G252 - ungated = -0.108 ± 0.111 bps/day (one-sided p = 0.83, 7 / 20 seeds), and with no decay it costs **0.104** Sharpe (p < 0.001, 3 / 20), over the 0.10 budget. The gate does halve post-decay costs (0.57 -> 0.30 bps/day), but a dead alpha's trailing mean is positive about half the time, so the gate is on for 50% of the dead years and spends what it saved on exits and re-entries. Losing the alpha still costs only about 0.27 bps/day ungated, because WF-PARTIAL already trades slowly. In the healthy market the gate is off 15-17% of the time and gives up 0.56 bps/day.
+
+### H7: band vs partial at train-chosen equal risk (`artifacts/vol_target_slice.md`)
+
+| selector | vol-targeted net Sharpe | unlevered net Sharpe | realised vol / 10% | mean leverage |
+|---|---|---|---|---|
+| WF-PARTIAL | 0.837 | 0.863 | 0.996 | 1.46 |
+| WF-BAND | 0.691 | 0.845 | 1.008 | 4.09 |
+| WF-PB | 0.829 | 0.879 | 1.002 | 2.62 |
+
+**H7 fails**: WF-PB - WF-PARTIAL = -0.008 ± 0.016 Sharpe (p = 0.62, 8 / 20 seeds). The pure band loses **0.146 ± 0.038** (p = 0.001, 5 / 20). This is slice 5's post-hoc result with leverage a trader could have used. Unlevered, PB is ahead by 0.016, but it needs 1.8x PARTIAL's leverage to reach the same risk and pays the superlinear impact on it. Training-window targeting holds OOS risk within 1% of target in a stationary market. **PARTIAL stays the recommended rule.**
+
+### Clustered trial count (`artifacts/clustered_dsr.md`)
+
+| trial count | mean trials | signal seeds DSR > 0.95 | null seeds DSR < 0.95 |
+|---|---|---|---|
+| raw 42 | 42.0 | 4 / 20 | 20 / 20 |
+| participation ratio | 1.0 (rounded) | 20 / 20 | 19 / 20 |
+| clustered, cut 0.5 | 1.0 | 20 / 20 | 19 / 20 |
+
+At the pre-set cut every seed's 42 rules form **one cluster**, so the clustered count lands on the participation ratio instead of between the two. It meets the null bar (19 / 20), but it adds no information here: the grid really is one bet.
+
+### Weaknesses (honest)
+
+- The gate is a single trailing-mean rule. A sequential test (CUSUM or a Bayesian IC posterior) that needs more evidence to switch back on is the natural next step. It would need its own pre-registration, because these seeds are spent.
+- The decay is instant and total, at a known bar. A slow IC fade, or an IC that flips sign, is untested.
+- Vol targeting was tested only in a stationary, constant-vol market, so it holds risk by construction. A vol-regime market is where train-chosen leverage could miss.
+- The clustering cut (0.5) was picked once. Cuts above about 0.9 would split the grid, and the count then depends on the cut, which is the arbitrariness DSR is meant to remove.
 
 ## Slice 5 (2026-11-01): cost-aware rebalancing chosen walk-forward, with deflated Sharpe
 
