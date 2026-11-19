@@ -395,3 +395,22 @@ def run_pooled_confirm(seeds=None) -> dict:
     ci = [float(c["mean"] - 1.96 * c["se"]), float(c["mean"] + 1.96 * c["se"])]
     return {**{k: o[k] for k in ("seeds", "means", "tests", "shrunk_delay_bars")},
             "H14": h14, "H15": h15, "recommend": bool(h14 and h15), "control_cost_ci": ci}
+
+
+def control_cost_by_seed_set() -> dict:
+    """Post-hoc slice-10 reading (decides nothing): CUSUM-S0.75's control cost on each seed set that
+    has tested it (slices 8, 9 and 10), the 100-seed pooled estimate, and a one-way ANOVA p for
+    whether the sets differ by more than chance."""
+    from scipy import stats
+
+    sets = {"slice 8 (1000-1019)": SHRINK_PROTOCOL["seeds"], "slice 9 (1100-1119)": REENTRY_PROTOCOL["seeds"],
+            "slice 10 (1200-1259)": POOLED_PROTOCOL["seeds"]}
+    diffs = {}
+    for name, seeds in sets.items():
+        rows = [shrink_seed(s, "control") for s in seeds]
+        diffs[name] = np.array([r["CUSUM-S"]["oos_sharpe"] - r["ungated"]["oos_sharpe"] for r in rows])
+    allv = np.concatenate(list(diffs.values()))
+    return {"per_set": {k: {"cost": float(-v.mean()), "se": float(v.std(ddof=1) / np.sqrt(v.size)), "n": int(v.size)}
+                        for k, v in diffs.items()},
+            "pooled": {"cost": float(-allv.mean()), "se": float(allv.std(ddof=1) / np.sqrt(allv.size)), "n": int(allv.size)},
+            "anova_p": float(stats.f_oneway(*diffs.values()).pvalue)}
