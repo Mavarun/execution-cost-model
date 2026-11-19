@@ -143,6 +143,52 @@ Reading:
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
 
+## Slice 9 (2026-11-20): a faster re-entry level for the shrunk CUSUM gate
+
+Slice 8's post-hoc reading found the control cost came from off-spells of about 500 bars, because switching back
+on needed the same level h. Slice 9 changes only that: `CusumGateParams.on_frac` = 0.25, so the gate re-enters at
+0.25 x h. Shrink stays at 0.75. The value was fixed a priori from slice 8's reading (spells about 4x shorter, so a
+~6% off share) before any slice-9 seed was run (`cusum_eval.REENTRY_PROTOCOL`, seeds 1100-1119, pinned disjoint from
+every earlier protocol). H12: the control costs less than 0.10 net Sharpe. H13: the gate still beats ungated after a
+decay (one-sided, 5%). Recommended only if both pass.
+
+Run: `python scripts/run_reentry_cusum.py` (~2 s; `artifacts/reentry_cusum.md`).
+
+| arm | decay: post bps/day | decay: on post | flip: post bps/day | control: OOS net Sharpe | control: on after bar 2,520 | control: switches |
+|---|---|---|---|---|---|---|
+| ungated WF-PARTIAL | -0.669 | 1.000 | -1.903 | 0.930 | 1.000 | 0.0 |
+| CUSUM-S0.75 (slice 8) | -0.317 | 0.320 | -0.378 | 0.879 | 0.857 | 1.1 |
+| CUSUM-S0.75-R0.25 | -0.643 | 0.833 | -1.262 | 0.916 | 0.980 | 1.6 |
+
+| gate - ungated | decay post bps/day (one-sided) | flip post bps/day (one-sided) | control OOS Sharpe |
+|---|---|---|---|
+| CUSUM-S0.75 (slice 8) | +0.352 ± 0.212 (p = 0.057, 13/20) | +1.526 ± 0.262 (p = 0.000, 20/20) | -0.051 ± 0.017 (p = 0.009, 1/20) |
+| CUSUM-S0.75-R0.25 | +0.026 ± 0.095 (p = 0.393, 8/20) | +0.641 ± 0.216 (p = 0.004, 14/20) | -0.014 ± 0.005 (p = 0.018, 1/20) |
+
+**H12 passes, H13 fails; fast re-entry is not recommended and the gate stays off.** The control cost falls to 0.014
+Sharpe, but the decay protection is gone. The post-decay gain is +0.026 bps/day (p = 0.393, 8/20), and the gate is on
+for 83% of post-decay bars, against 32% for slice 8's gate on the same seeds. The flip gain shrinks from +1.526 to
++0.641 bps/day.
+
+### Post-hoc reading (decides nothing; `cusum_eval.decay_reentries`, `control_off_spells`)
+
+- **Asymmetric levels move the problem rather than solve it.** After a real decay, the fast gate switches back on
+  63 times across the 20 seeds (3.15 per seed, against 0.55 at full h). Each false on-spell lasts a median 437 bars,
+  because switching back off still needs the full h. A gate that is quick to forgive is slow to notice again.
+- **Slice 8's control cost depends heavily on the seeds.** On these seeds the slice-8 gate (CUSUM-S0.75) costs only
+  0.051 Sharpe, inside the budget. Its false alarms fall to 13 (one per 5,815 OOS bars, against 37 on slice 8's
+  seeds 1000-1019), and its off share is 10% (25% there). Slice 8's H10 failure stands as tested, but the two 20-seed
+  estimates of the same gate's cost differ by 0.12 Sharpe (0.172 ± 0.039 vs 0.051 ± 0.017), more than their standard
+  errors suggest. A future gate decision needs more control seeds or a pooled estimate, not another single 20-seed run.
+- The next idea worth pre-registering is a re-entry that does not lower the bar to switch on, such as a cap on the
+  off-spell length with a re-check. It is not tried here.
+
+### Weaknesses
+
+- on_frac 0.25 was a single a-priori value. Nothing between 0.25 and 1 was tried, and the post-hoc reading suggests
+  that no single level fixes both failure modes.
+- The same synthetic AR(1) alpha, one break shape at a known bar, 20 seeds.
+
 ## Slice 8 (2026-11-19): shrinking the CUSUM's optimistic reference
 
 Slice 7's post-hoc reading found the CUSUM's alive reference (the first fold's in-sample net) overstated the OOS
