@@ -109,3 +109,34 @@ def run_cusum_study(seeds=None, **kw) -> dict:
             "recommend": bool(h8 and ctl_ok),
             "cusum_delay_bars": {m: {"median": float(np.median([d for d in v if d is not None])) if any(d is not None for d in v) else None,
                                      "never_off": int(sum(d is None for d in v))} for m, v in delays.items()}}
+
+
+def reference_bias(seeds=None) -> dict:
+    """Post-hoc reading (decides nothing): the CUSUM's alive reference vs what the alpha earns OOS.
+
+    The reference is the last ``ref_bars`` shadow bars before the first OOS bar, which are the
+    first fold's *in-sample* net returns of the rule chosen on them, so they are optimistic. On
+    the no-break control this compares that reference mean with the OOS shadow mean, and reports
+    the off-sum's realised drift per bar against the drift the ARL target was solved for.
+    """
+    p = CUSUM_PROTOCOL
+    seeds = tuple(seeds if seeds is not None else p["seeds"])
+    ref_m, oos_m, sds = [], [], []
+    for s in seeds:
+        path, _ = _path(s, "control", None, None)
+        costs = cost_params()
+        rules = candidate_rules()[p["selector"]]
+        runs = run_rules(path, rules, costs)
+        wf = walk_forward(path, rules, costs, min_train=PROTOCOL["min_train"], test_len=PROTOCOL["test_len"], runs=runs)
+        sh = shadow_record(wf, runs)
+        s0 = wf.fold_starts[0]
+        ref = sh[s0 - p["cusum"]["ref_bars"]:s0]
+        ref_m.append(float(ref.mean()))
+        oos_m.append(float(sh[s0:].mean()))
+        sds.append(float(ref.std(ddof=1)))
+    ref_m, oos_m, sds = map(np.array, (ref_m, oos_m, sds))
+    designed = 0.5 * ref_m / sds  # drift away from the off alarm the ARL target assumes
+    realised = (oos_m - 0.5 * ref_m) / sds  # drift it actually gets while alive
+    return {"ref_mean_bps": float(ref_m.mean() * 1e4), "oos_mean_bps": float(oos_m.mean() * 1e4),
+            "seeds_ref_above_oos": int((ref_m > oos_m).sum()), "n": len(seeds),
+            "median_designed_drift": float(np.median(designed)), "median_realised_drift": float(np.median(realised))}
