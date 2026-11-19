@@ -358,3 +358,40 @@ def decay_reentries(on_frac: float, seeds=None, market: str = "decay") -> dict:
     return {"reentries": int(reent), "per_seed": reent / len(seeds),
             "median_on_spell": float(np.median(spells)) if spells.size else 0.0,
             "mean_on_spell": float(spells.mean()) if spells.size else 0.0, "post_bars": int(bars)}
+
+
+# --------------------------------------------------------------------------------------------
+# Slice 10 (frozen 2026-11-20, before any of its seeds was run).
+#
+# Slice 9's post-hoc reading found slice 8's gate (CUSUM-S0.75, shrink 0.75, symmetric re-entry)
+# cost 0.172 Sharpe on the control on seeds 1000-1019 but only 0.051 on 1100-1119: two 20-seed
+# estimates of one quantity that disagree by more than their standard errors suggest. A single
+# 20-seed run cannot settle whether that gate meets the budget. Slice 10 re-runs exactly slice 8's
+# arms on 60 fresh seeds (1200-1259), three times the power, and decides on them alone (the
+# earlier seed sets have been looked at; they are reported but not pooled into the decision).
+#
+# * H14: CUSUM-S0.75 costs less than 0.10 OOS net Sharpe vs ungated on the no-break control
+#   (point estimate, as in slices 7-9); its 95% CI is reported.
+# * H15: CUSUM-S0.75 beats ungated on post-decay net bps/day, one-sided paired t at 5%.
+# * The shrunk gate is recommended only if both pass. ``CusumGateParams`` defaults do not change
+#   in this slice either way; a pass is recorded as the recommended setting in the README.
+# --------------------------------------------------------------------------------------------
+POOLED_PROTOCOL = {
+    "shrink": 0.75,
+    "seeds": tuple(range(1200, 1260)),
+    "alpha_level": 0.05,
+    "max_control_sharpe_loss": 0.10,
+}
+
+
+def run_pooled_confirm(seeds=None) -> dict:
+    """Slice 8's arms (ungated, CUSUM, CUSUM-S0.75) on the slice-10 seeds, decided by H14 / H15."""
+    p = POOLED_PROTOCOL
+    o = run_shrink_study(seeds if seeds is not None else p["seeds"])
+    t = o["tests"]["CUSUM-S"]
+    c = t["control_sharpe"]
+    h14 = bool(c["mean"] > -p["max_control_sharpe_loss"])
+    h15 = bool(t["decay_post_bps"]["p"] < p["alpha_level"] and t["decay_post_bps"]["mean"] > 0)
+    ci = [float(c["mean"] - 1.96 * c["se"]), float(c["mean"] + 1.96 * c["se"])]
+    return {**{k: o[k] for k in ("seeds", "means", "tests", "shrunk_delay_bars")},
+            "H14": h14, "H15": h15, "recommend": bool(h14 and h15), "control_cost_ci": ci}
