@@ -116,10 +116,12 @@ class CusumGateParams:
     ref_bars: int = 1260  # shadow bars before ``start`` used for the alive mean and sd
     h: float | None = None  # fixed alarm level; None derives it from ``arl0`` (``siegmund_h``)
     shrink: float = 1.0  # alive level used = shrink x the reference mean (slice 8; 1.0 = slice 7)
+    on_frac: float = 1.0  # re-entry level = on_frac x h (slice 9; 1.0 = the symmetric slice 7/8 gate)
 
     def label(self) -> str:
         base = f"C{self.h:g}" if self.h is not None else f"CARL{self.arl0:g}"
-        return base if self.shrink == 1.0 else f"{base}s{self.shrink:g}"
+        base = base if self.shrink == 1.0 else f"{base}s{self.shrink:g}"
+        return base if self.on_frac == 1.0 else f"{base}r{self.on_frac:g}"
 
 
 def siegmund_arl(h: float, delta: float) -> float:
@@ -163,11 +165,18 @@ def cusum_gate_states(shadow: np.ndarray, start: int, gate: CusumGateParams) -> 
     reference bars are the first fold's in-sample net, which overstates the OOS level; shrinking
     it moves both the midpoint ``m`` and the drift the alarm level is solved for, so the ARL target
     holds at the level the alpha actually earns, at the cost of a slower reaction to a decay.
+
+    ``gate.on_frac`` sets the re-entry level to ``on_frac * h`` (slice 9). With 1.0 the gate needs
+    the full alarm level to switch back on, so one false alarm keeps it off for hundreds of bars
+    (slice 8's post-hoc reading); a lower level re-enters sooner, at the price of re-entering
+    falsely more often after a real decay.
     """
     if gate.ref_bars < 20 or (gate.h is not None and gate.h <= 0):
         raise ValueError("need ref_bars >= 20 and h > 0 when given")
     if not 0.0 < gate.shrink <= 1.0:
         raise ValueError("need 0 < shrink <= 1")
+    if not 0.0 < gate.on_frac <= 1.0:
+        raise ValueError("need 0 < on_frac <= 1")
     if start < gate.ref_bars:
         raise ValueError("need ref_bars bars of shadow history before start")
     ref = shadow[start - gate.ref_bars:start]
@@ -186,7 +195,7 @@ def cusum_gate_states(shadow: np.ndarray, start: int, gate: CusumGateParams) -> 
         s_on = max(0.0, s_on + (x - m) / sd)
         if state == 1.0 and s_off > h:
             state, s_off, s_on = 0.0, 0.0, 0.0
-        elif state == 0.0 and s_on > h:
+        elif state == 0.0 and s_on > gate.on_frac * h:
             state, s_off, s_on = 1.0, 0.0, 0.0
     return on
 
