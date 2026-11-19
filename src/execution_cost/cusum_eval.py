@@ -218,3 +218,32 @@ def run_shrink_study(seeds=None) -> dict:
         delays[m] = {"median": float(np.median(got)) if got else None, "never_off": int(sum(x is None for x in d))}
     return {"seeds": list(seeds), "means": means, "tests": tests, "H10": h10, "H11": h11,
             "recommend": bool(h10 and h11), "shrunk_delay_bars": delays}
+
+
+def control_off_spells(shrink: float, seeds=None) -> dict:
+    """Post-hoc slice-8 reading (decides nothing): false alarms and off-spells on the no-break control.
+
+    Splits the control's off time into how often the gate falsely switches off (OOS bars per
+    alarm, vs the 2,520 target) and how long it stays off each time (spells still open at the
+    end are cut there, so lengths are a lower bound).
+    """
+    c = CUSUM_PROTOCOL["cusum"]
+    seeds = tuple(seeds if seeds is not None else SHRINK_PROTOCOL["seeds"])
+    spells, alarms, bars = [], 0, 0
+    for s in seeds:
+        path, _ = _path(s, "control", None, None)
+        costs = cost_params()
+        rules = candidate_rules()[CUSUM_PROTOCOL["selector"]]
+        runs = run_rules(path, rules, costs)
+        wf = walk_forward(path, rules, costs, min_train=PROTOCOL["min_train"], test_len=PROTOCOL["test_len"], runs=runs)
+        on = cusum_gate_states(shadow_record(wf, runs), wf.fold_starts[0],
+                               CusumGateParams(arl0=c["arl0"], ref_bars=c["ref_bars"], shrink=shrink))
+        d = np.diff(np.r_[1.0, on, 1.0])
+        starts, ends = np.flatnonzero(d == -1), np.flatnonzero(d == 1)
+        spells += list(ends - starts)
+        alarms += starts.size
+        bars += on.size
+    spells = np.array(spells, dtype=float)
+    return {"alarms": int(alarms), "bars_per_alarm": float(bars / alarms) if alarms else float("inf"),
+            "median_off_spell": float(np.median(spells)) if spells.size else 0.0,
+            "mean_off_spell": float(spells.mean()) if spells.size else 0.0, "share_off": float(spells.sum() / bars)}
