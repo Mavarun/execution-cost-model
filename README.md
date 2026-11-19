@@ -143,6 +143,52 @@ Reading:
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
 
+## Slice 10 (2026-11-20): the shrunk gate on 60 fresh seeds passes, narrowly
+
+Slice 9 found two 20-seed estimates of slice 8's gate (CUSUM-S0.75) control cost that disagree: 0.172 and 0.051 Sharpe.
+Slice 10 re-runs slice 8's arms unchanged on 60 fresh seeds (1200-1259), three times the power, and decides on those
+seeds alone (`cusum_eval.POOLED_PROTOCOL`, frozen before the run). H14: the control costs less than 0.10 Sharpe. H15:
+post-decay gain over ungated (one-sided, 5%). The gate is recommended only if both pass. `CusumGateParams` defaults
+do not change in this slice either way.
+
+Run: `python scripts/run_pooled_cusum.py` (~3 s; `artifacts/pooled_cusum.md`).
+
+| arm | decay: post bps/day | decay: on post | flip: post bps/day | control: OOS net Sharpe | control: on after bar 2,520 |
+|---|---|---|---|---|---|
+| ungated WF-PARTIAL | -0.691 | 1.000 | -1.966 | 0.919 | 1.000 |
+| CUSUM (slice 7) | -0.155 | 0.206 | -0.263 | 0.790 | 0.673 |
+| CUSUM-S0.75 (slice 8) | -0.170 | 0.261 | -0.301 | 0.823 | 0.771 |
+
+| gate - ungated | decay post bps/day (one-sided) | flip post bps/day (one-sided) | control OOS Sharpe |
+|---|---|---|---|
+| CUSUM (slice 7) | +0.535 ± 0.102 (p = 0.000, 44/60) | +1.703 ± 0.118 (p = 0.000, 57/60) | -0.129 ± 0.019 (p = 0.000, 5/60) |
+| CUSUM-S0.75 (slice 8) | +0.521 ± 0.097 (p = 0.000, 39/60) | +1.665 ± 0.119 (p = 0.000, 56/60) | -0.096 ± 0.018 (p = 0.000, 5/60) |
+
+**H14 and H15 pass, so the protocol recommends CUSUM-S0.75, but only narrowly.** The control cost is 0.096 Sharpe, and its
+95% CI (0.060-0.133) contains the 0.10 budget. The post-decay gain is +0.521 bps/day (p < 0.001, 39/60). The
+recommended setting is `CusumGateParams(shrink=0.75)`. The package default (no gate) is unchanged.
+
+### Post-hoc reading (decides nothing; `cusum_eval.control_cost_by_seed_set`)
+
+| seed set | control cost (Sharpe) | seeds |
+| --- | ---: | ---: |
+| slice 8 (1000-1019) | 0.172 ± 0.039 | 20 |
+| slice 9 (1100-1119) | 0.051 ± 0.017 | 20 |
+| slice 10 (1200-1259) | 0.096 ± 0.018 | 60 |
+| all 100 | 0.102 ± 0.014 | 100 |
+
+- Across all 100 seeds that have tested this gate, the cost is 0.102, just over the budget. The three
+  sets differ more than chance would explain (one-way ANOVA p = 0.024). The slice-10 pass therefore depends
+  on which 60 seeds were drawn: the honest reading is "at the budget", not "under it".
+- On the slice-10 seeds the gate is off 18% of control bars: 71 false alarms, a
+  median off-spell of 440 bars. Slice 9 showed that lowering the re-entry level trades this
+  for losing the decay protection.
+
+### Weaknesses
+
+- A point-estimate budget rule with a CI that straddles it. A future rule should bound the CI, not the mean.
+- The same synthetic AR(1) alpha and one break shape at a known bar.
+
 ## Slice 9 (2026-11-20): a faster re-entry level for the shrunk CUSUM gate
 
 Slice 8's post-hoc reading found the control cost came from off-spells of about 500 bars, because switching back
