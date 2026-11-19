@@ -53,6 +53,7 @@ python scripts/run_decay_slice.py                   # slice 6 H6: trailing-perfo
 python scripts/run_vol_target_slice.py              # slice 6 H7: train-chosen vol targeting, band vs partial (~4 s)
 python scripts/run_clustered_dsr.py                 # slice 6: clustered trial count for the deflated Sharpe (~5 s)
 python scripts/run_cusum_slice.py                   # slice 7: CUSUM gate under an IC decay and flip (~2 s)
+python scripts/run_shrunk_cusum.py                  # slice 8: CUSUM with a shrunk in-sample reference (~2 s)
 ```
 
 ## Layout
@@ -142,11 +143,54 @@ Reading:
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
 
+## Slice 8 (2026-11-19): shrinking the CUSUM's optimistic reference
+
+Slice 7's post-hoc reading found the CUSUM's alive reference (the first fold's in-sample net) overstated the OOS
+level by about a third. Slice 8 changes only that: `CusumGateParams.shrink` = 0.75, fixed from slice 7's OOS/reference
+ratio before any slice-8 seed was run (`cusum_eval.SHRINK_PROTOCOL`, seeds 1000-1019, disjoint from every earlier
+protocol). H10: the shrunk gate costs less than 0.10 net Sharpe on the no-break control. H11: it still beats ungated
+after a decay (one-sided, 5%). Recommended only if both pass.
+
+**Correction to slice 7:** its seeds (900-919) were described as fresh, but slice 6's vol-target study (H7) had
+already used them for the same no-break market. No CUSUM setting was chosen from that study, so slice 7's tests stand,
+but the "fresh" claim was wrong. A test now pins slice 8's seeds against every earlier protocol.
+
+Run: `python scripts/run_shrunk_cusum.py` (~2 s; `artifacts/shrunk_cusum.md`).
+
+| arm | decay: post bps/day | decay: on post | flip: post bps/day | control: OOS net Sharpe | control: on after bar 2,520 |
+|---|---|---|---|---|---|
+| ungated WF-PARTIAL | -0.571 | 1.000 | -1.665 | 0.878 | 1.000 |
+| CUSUM (slice 7) | -0.213 | 0.189 | -0.225 | 0.665 | 0.641 |
+| CUSUM-S0.75 | -0.247 | 0.217 | -0.216 | 0.706 | 0.698 |
+
+| gate - ungated | decay post bps/day (one-sided) | flip post bps/day (one-sided) | control OOS Sharpe |
+|---|---|---|---|
+| CUSUM (slice 7) | +0.358 ± 0.150 (p = 0.014, 13/20) | +1.440 ± 0.166 (p = 0.000, 19/20) | -0.213 ± 0.044 (p = 0.000, 2/20) |
+| CUSUM-S0.75 | +0.324 ± 0.140 (p = 0.016, 13/20) | +1.449 ± 0.169 (p = 0.000, 19/20) | -0.172 ± 0.039 (p = 0.000, 2/20) |
+
+**H10 fails, H11 passes; the shrunk gate is not recommended and ships off.** Shrinking cuts the control cost from
+0.213 to 0.172 Sharpe, still well over the 0.10 budget, and keeps the post-decay gain (+0.324 bps/day,
+p = 0.016). The slice-7 gate reproduces on these seeds (control cost 0.213).
+
+### Post-hoc reading (decides nothing; `cusum_eval.control_off_spells`)
+
+On the control, shrinking does what it was meant to: false alarms fall from 50 to 37 (one per 1,512 -> 2,043
+OOS bars, near the 2,520 target). But each false alarm keeps the gate off for a mean 506 bars (median 345),
+because switching back on needs the same level h while the on-sum climbs only by (true level - midpoint) per bar.
+So the gate is still off 25% of the time when nothing is wrong. Fixing the reference alone cannot meet the
+budget; a faster re-entry rule (a lower on-level, or a cap on off-spells) is the next thing to pre-register.
+
+### Weaknesses
+
+- Shrink 0.75 was set from one post-hoc ratio on 20 seeds; it was not tuned on these seeds, but nothing else was tried.
+- Off-spells that are still open at the end are cut there, so spell lengths are a lower bound.
+- The same synthetic AR(1) alpha, one break shape at a known bar, 20 seeds.
+
 ## Slice 7 (2026-11-19): a sequential CUSUM gate, and an alpha that flips sign
 
 Slice 6 named two next steps: a sequential gate that needs more evidence to switch back on than a trailing mean,
 and an alpha whose IC flips sign instead of fading to zero. Both are tested here under a protocol frozen in
-`cusum_eval.CUSUM_PROTOCOL` and committed before any of its seeds (900-919, fresh) was run.
+`cusum_eval.CUSUM_PROTOCOL` and committed before any of its seeds (900-919; not fresh after all, see slice 8) was run.
 
 ### What was added
 
