@@ -140,3 +140,81 @@ def reference_bias(seeds=None) -> dict:
     return {"ref_mean_bps": float(ref_m.mean() * 1e4), "oos_mean_bps": float(oos_m.mean() * 1e4),
             "seeds_ref_above_oos": int((ref_m > oos_m).sum()), "n": len(seeds),
             "median_designed_drift": float(np.median(designed)), "median_realised_drift": float(np.median(realised))}
+
+
+# --------------------------------------------------------------------------------------------
+# Slice 8 (frozen 2026-11-19, before any of its seeds was run).
+#
+# Slice 7's gate passed H8/H9 but cost 0.204 Sharpe on the control. The post-hoc reading
+# (``reference_bias``, which selected nothing) found its in-sample reference overstated the OOS
+# level: on slice 7's control the OOS/reference mean ratio was 0.77 (mean) / 0.75 (median). Slice 8
+# changes exactly one thing, fixed from that reading before any slice-8 seed was run: the alive
+# level is shrunk to 0.75 x the reference (``CusumGateParams.shrink``). Everything else is
+# slice 7's protocol. Seeds 1000-1019 are disjoint from every earlier protocol (slice 7's
+# 900-919 had in fact been used before, by slice 6's vol-target H7, which is disclosed).
+#
+# * H10 (the one that failed): CUSUM-S0.75 costs less than 0.10 OOS net Sharpe vs ungated on
+#   the no-break control (point estimate, as in slice 7).
+# * H11: CUSUM-S0.75 beats ungated on post-decay net bps/day, one-sided paired t at 5%.
+# * Recommended only if H10 and H11 both pass; otherwise the gate stays off. The flip and the
+#   unshrunk slice-7 gate are reported alongside and decide nothing.
+# --------------------------------------------------------------------------------------------
+SHRINK_PROTOCOL = {
+    "shrink": 0.75,
+    "seeds": tuple(range(1000, 1020)),
+    "alpha_level": 0.05,
+    "max_control_sharpe_loss": 0.10,
+}
+SHRINK_ARMS = ("ungated", "CUSUM", "CUSUM-S")
+
+
+def shrink_seed(seed: int, market: str = "decay") -> dict:
+    path, sw = _path(seed, market, None, None)
+    costs = cost_params()
+    rules = candidate_rules()[CUSUM_PROTOCOL["selector"]]
+    runs = run_rules(path, rules, costs)
+    wf = walk_forward(path, rules, costs, min_train=PROTOCOL["min_train"], test_len=PROTOCOL["test_len"], runs=runs)
+    post = wf.oos_index >= sw
+    sh, s0 = shadow_record(wf, runs), wf.fold_starts[0]
+    c = CUSUM_PROTOCOL["cusum"]
+    res = {"ungated": (wf.net, np.ones(post.size))}
+    for arm, shrink in (("CUSUM", 1.0), ("CUSUM-S", SHRINK_PROTOCOL["shrink"])):
+        on = cusum_gate_states(sh, s0, CusumGateParams(arl0=c["arl0"], ref_bars=c["ref_bars"], shrink=shrink))
+        res[arm] = (gated_walk_forward_states(path, wf, runs, costs, on).net, on)
+    out = {}
+    for arm, (net, state) in res.items():
+        off_post = np.flatnonzero(state[post] == 0.0)
+        out[arm] = {"post_bps": float(net[post].mean() * 1e4), "oos_sharpe": annualized_sharpe(net),
+                    "share_on_pre": float(state[~post].mean()), "share_on_post": float(state[post].mean()),
+                    "first_off_after_switch": int(off_post[0]) if off_post.size else None}
+    return out
+
+
+def run_shrink_study(seeds=None) -> dict:
+    p = SHRINK_PROTOCOL
+    seeds = tuple(seeds if seeds is not None else p["seeds"])
+    markets = tuple(CUSUM_PROTOCOL["markets"])
+    rows = {m: [shrink_seed(s, m) for s in seeds] for m in markets}
+
+    def arr(m, arm, key):
+        return np.array([r[arm][key] for r in rows[m]], dtype=float)
+
+    keys = ("post_bps", "oos_sharpe", "share_on_pre", "share_on_post")
+    means = {m: {a: {k: float(np.mean(arr(m, a, k))) for k in keys} for a in SHRINK_ARMS} for m in markets}
+    tests = {arm: {"decay_post_bps": paired_seed_test(arr("decay", arm, "post_bps"), arr("decay", "ungated", "post_bps"),
+                                                      alternative="greater"),
+                   "flip_post_bps": paired_seed_test(arr("flip", arm, "post_bps"), arr("flip", "ungated", "post_bps"),
+                                                     alternative="greater"),
+                   "control_sharpe": paired_seed_test(arr("control", arm, "oos_sharpe"),
+                                                      arr("control", "ungated", "oos_sharpe"))}
+             for arm in ("CUSUM", "CUSUM-S")}
+    t = tests["CUSUM-S"]
+    h10 = bool(t["control_sharpe"]["mean"] > -p["max_control_sharpe_loss"])
+    h11 = bool(t["decay_post_bps"]["p"] < p["alpha_level"] and t["decay_post_bps"]["mean"] > 0)
+    delays = {}
+    for m in ("decay", "flip"):
+        d = [r["CUSUM-S"]["first_off_after_switch"] for r in rows[m]]
+        got = [x for x in d if x is not None]
+        delays[m] = {"median": float(np.median(got)) if got else None, "never_off": int(sum(x is None for x in d))}
+    return {"seeds": list(seeds), "means": means, "tests": tests, "H10": h10, "H11": h11,
+            "recommend": bool(h10 and h11), "shrunk_delay_bars": delays}
