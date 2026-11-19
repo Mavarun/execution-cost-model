@@ -100,3 +100,106 @@ def gated_walk_forward(
         w_held = float(w[-1])
     return GatedResult(on=on, weights=np.concatenate(parts["w"]), gross=np.concatenate(parts["g"]),
                        cost=np.concatenate(parts["c"]), net=np.concatenate(parts["n"]))
+
+
+# --- Slice 7: a sequential (CUSUM) gate with hysteresis ------------------------------------------
+# Slice 6's trailing-mean gate flips on noise: a 252-bar mean of daily net returns with a daily
+# Sharpe of ~0.07 is below zero a good share of the time even when the alpha is alive (it was on
+# only 85% of pre-decay bars), and it switches back on just as easily. A two-sided Page CUSUM
+# needs accumulated evidence in each direction, and the two directions use separate sums, so
+# switching back on costs as much evidence as switching off.
+
+
+@dataclass(frozen=True)
+class CusumGateParams:
+    arl0: float = 2520.0  # target bars between false "off" alarms while the alpha is alive
+    ref_bars: int = 1260  # shadow bars before ``start`` used for the alive mean and sd
+    h: float | None = None  # fixed alarm level; None derives it from ``arl0`` (``siegmund_h``)
+
+    def label(self) -> str:
+        return f"C{self.h:g}" if self.h is not None else f"CARL{self.arl0:g}"
+
+
+def siegmund_arl(h: float, delta: float) -> float:
+    """Siegmund's approximation to a one-sided CUSUM's average run length.
+
+    Increments have mean ``-delta`` (drift away from the alarm) and unit variance; ``h`` is the
+    alarm level. Uses the usual 1.166 boundary correction.
+    """
+    b = h + 1.166
+    x = 2.0 * delta * b
+    return float((np.exp(x) - x - 1.0) / (2.0 * delta**2))
+
+
+def siegmund_h(delta: float, arl0: float) -> float:
+    """Smallest alarm level whose in-control ARL (``siegmund_arl``) reaches ``arl0``."""
+    if delta <= 0 or arl0 <= 1:
+        raise ValueError("need delta > 0 and arl0 > 1")
+    lo, hi = 0.0, 1.0
+    while siegmund_arl(hi, delta) < arl0:
+        hi *= 2.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if siegmund_arl(mid, delta) < arl0 else (lo, mid)
+    return hi
+
+
+def cusum_gate_states(shadow: np.ndarray, start: int, gate: CusumGateParams) -> np.ndarray:
+    """Gate state for bars ``[start, len(shadow))`` from a two-sided CUSUM on the shadow net return.
+
+    Reference: the shadow's mean ``mu`` and sd ``sd`` over the ``ref_bars`` bars before ``start``
+    (the alive level, known at the start). The test is between "alive" (mean ``mu``) and "dead"
+    (mean 0), so each bar adds ``(m - x) / sd`` to the off-sum and ``(x - m) / sd`` to the on-sum,
+    with ``m = mu / 2``; while alive the off-sum drifts down by ``delta = mu / (2 sd)`` per bar.
+    The alarm level is ``gate.h`` if set, else ``siegmund_h(delta, gate.arl0)``: a daily
+    alpha Sharpe of ~0.07 gives delta ~0.03, and with that drift an h of 5 false-alarms within
+    weeks, so h has to come from the ARL target, not a textbook constant. The gate turns off when
+    the off-sum exceeds h and back on when the on-sum does; each switch resets both sums. State at
+    bar ``t`` uses shadow bars before ``t``. If the reference mean is not positive the gate stays on.
+    """
+    if gate.ref_bars < 20 or (gate.h is not None and gate.h <= 0):
+        raise ValueError("need ref_bars >= 20 and h > 0 when given")
+    if start < gate.ref_bars:
+        raise ValueError("need ref_bars bars of shadow history before start")
+    ref = shadow[start - gate.ref_bars:start]
+    mu, sd = float(ref.mean()), float(ref.std(ddof=1))
+    n = shadow.size - start
+    if mu <= 0 or sd <= 0:
+        return np.ones(n)
+    m = 0.5 * mu
+    h = gate.h if gate.h is not None else siegmund_h(m / sd, gate.arl0)
+    on = np.empty(n)
+    state, s_off, s_on = 1.0, 0.0, 0.0
+    for i in range(n):
+        on[i] = state
+        x = shadow[start + i]  # observed after the decision for bar start + i
+        s_off = max(0.0, s_off + (m - x) / sd)
+        s_on = max(0.0, s_on + (x - m) / sd)
+        if state == 1.0 and s_off > h:
+            state, s_off, s_on = 0.0, 0.0, 0.0
+        elif state == 0.0 and s_on > h:
+            state, s_off, s_on = 1.0, 0.0, 0.0
+    return on
+
+
+def gated_walk_forward_states(
+    path: AlphaPath, wf: WalkForwardResult, runs: list[RuleRun], params: CostParams, on: np.ndarray
+) -> GatedResult:
+    """``gated_walk_forward`` with precomputed OOS gate states (any gate, e.g. the CUSUM one)."""
+    by_label: dict[str, Rule] = {r.rule.label: r.rule for r in runs}
+    s0 = wf.fold_starts[0]
+    n = path.returns.size
+    if on.size != n - s0:
+        raise ValueError("gate states must cover every OOS bar")
+    w_held = 0.0
+    parts = {"w": [], "g": [], "c": [], "n": []}
+    for k, s in enumerate(wf.fold_starts):
+        e = wf.fold_starts[k + 1] if k + 1 < len(wf.fold_starts) else n
+        rule = by_label[wf.choices[k]]
+        w = rule.positions(path.target[s:e] * on[s - s0:e - s0], w0=w_held)
+        g, c, nn = net_returns(path.returns[s:e], w, params, daily_vol=path.daily_vol[s:e], w0=w_held)
+        for key, v in zip("wgcn", (w, g, c, nn)):
+            parts[key].append(v)
+        w_held = float(w[-1])
+    return GatedResult(on=on, weights=np.concatenate(parts["w"]), gross=np.concatenate(parts["g"]),
+                       cost=np.concatenate(parts["c"]), net=np.concatenate(parts["n"]))
