@@ -52,6 +52,7 @@ python scripts/run_walkforward_slice.py             # slice 5: walk-forward reba
 python scripts/run_decay_slice.py                   # slice 6 H6: trailing-performance gate under an IC decay (~2 s)
 python scripts/run_vol_target_slice.py              # slice 6 H7: train-chosen vol targeting, band vs partial (~4 s)
 python scripts/run_clustered_dsr.py                 # slice 6: clustered trial count for the deflated Sharpe (~5 s)
+python scripts/run_cusum_slice.py                   # slice 7: CUSUM gate under an IC decay and flip (~2 s)
 ```
 
 ## Layout
@@ -77,6 +78,8 @@ python scripts/run_clustered_dsr.py                 # slice 6: clustered trial c
 - `src/execution_cost/sharpe_stats.py` - PSR, expected max Sharpe, deflated Sharpe, effective trials, Newey-West
 - `src/execution_cost/walkforward.py` - expanding-window rule selection, OOS stitching
 - `src/execution_cost/walkforward_eval.py` - slice-5 pre-registered protocol and harness
+- `src/execution_cost/decay_gate.py` - slice-6 trailing gate, slice-7 CUSUM gate with an ARL-derived level
+- `src/execution_cost/cusum_eval.py` - slice-7 protocol (decay, flip, control) and reference-bias reading
 - `scripts/run_walkforward_slice.py` - CLI for slice 5
 - `scripts/run_adaptive_slice.py` - CLI for slice 4
 - `scripts/run_cost_slice.py` - CLI for baseline + cost curve
@@ -138,6 +141,68 @@ Reading:
 - POV is idealised: it sees current-interval volume without lag. *(Slice 3 adds an implementable lag-1 POV.)*
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
+
+## Slice 7 (2026-11-19): a sequential CUSUM gate, and an alpha that flips sign
+
+Slice 6 named two next steps: a sequential gate that needs more evidence to switch back on than a trailing mean,
+and an alpha whose IC flips sign instead of fading to zero. Both are tested here under a protocol frozen in
+`cusum_eval.CUSUM_PROTOCOL` and committed before any of its seeds (900-919, fresh) was run.
+
+### What was added
+
+- `decay_gate.cusum_gate_states`: a two-sided Page CUSUM on the shadow net return, testing "alive" (the
+  reference mean) against "dead" (zero). Separate off and on sums give hysteresis; each switch resets both.
+- `decay_gate.siegmund_h`: the alarm level comes from Siegmund's ARL approximation with a target of 2,520 bars
+  between false alarms while alive. At this market's daily alpha Sharpe (~0.07) the per-bar drift is ~0.035,
+  and a textbook h = 5 would false-alarm within about 44 bars; the target needs h ~31.
+- `cusum_eval`: the slice-6 decay (IC 0.10 -> 0 at bar 2,520), a **flip** (IC 0.10 -> -0.05) and a no-break
+  control; WF-PARTIAL; arms ungated, slice 6's G252 (reference) and the CUSUM gate. H8: CUSUM beats ungated on
+  post-decay net bps (one-sided paired t, 5%); H9: the same on the flip; recommended only if H8 passes and the
+  control costs under 0.10 net Sharpe.
+
+### Results (`python scripts/run_cusum_slice.py`, ~2 s; `artifacts/cusum_slice.md`; 20 seeds)
+
+| arm | decay: post bps/day | decay: on post | flip: post bps/day | flip: on post | control: OOS net Sharpe | control: on post |
+|---|---|---|---|---|---|---|
+| ungated WF-PARTIAL | -0.822 | 1.000 | -2.073 | 1.000 | 0.863 | 1.000 |
+| G252 (slice 6) | -0.390 | 0.407 | -0.465 | 0.248 | 0.767 | 0.810 |
+| CUSUM (ARL 2,520) | -0.254 | 0.190 | -0.211 | 0.080 | 0.659 | 0.701 |
+
+| gate - ungated | decay post bps/day (one-sided) | flip post bps/day (one-sided) | control OOS Sharpe |
+|---|---|---|---|
+| G252 | +0.432 ± 0.180 (p = 0.014, 16/20) | +1.609 ± 0.229 (p = 0.000, 19/20) | -0.096 ± 0.023 (p = 0.001, 2/20) |
+| CUSUM | +0.568 ± 0.200 (p = 0.005, 14/20) | +1.863 ± 0.246 (p = 0.000, 19/20) | -0.204 ± 0.055 (p = 0.002, 1/20) |
+
+Reading:
+
+- **H8 and H9 pass, but the gate is not recommended and ships off.** It cuts the post-decay loss and most of
+  the flip loss, and switches off a median 266.5 bars after a decay and 164 after a flip. But on the market where
+  nothing breaks it gives up **0.204** net Sharpe, twice the 0.10 budget, because it is off on
+  30% of bars when the alpha is alive.
+- **The flip is where any gate pays.** Ungated loses 2.07 bps/day after a flip; both gates recover
+  most of it on 19 of 20 seeds.
+- **Seeds matter.** On these seeds slice 6's G252 also helps after a decay (p = 0.014), where on slice 6's seeds it
+  did not (one-sided p = 0.83). Its control cost (0.096) is again right at the budget.
+
+### Post-hoc reading (decides nothing; `cusum_eval.reference_bias`)
+
+The CUSUM's alive reference is the 1,260 shadow bars before the first OOS bar, which are the first fold's
+*in-sample* net returns of the rule chosen on them. They overstate what the alpha earns out of sample
+(3.07 vs 2.35 bps/day on the control, higher on 13 of 20 seeds). So while the alpha is alive
+the off-sum drifts away from its alarm at a median 0.015 per bar, not the 0.035 the level was solved for.
+By the same formula that cuts the median false-alarm ARL from 2,520 to about 1,441 bars, and seeds with a
+worse reference do much worse. An out-of-sample reference (or shrinking the in-sample mean toward zero) is the
+obvious fix, and it needs its own pre-registration because these seeds are spent.
+
+### Weaknesses (honest)
+
+- One break shape per market, at a known bar, instant and total. A slow fade is still untested.
+- The ARL target (2,520 bars) was picked once, a priori; a longer one trades control cost for detection delay
+  and was not swept.
+- The reference is estimated from 1,260 bars with an in-sample bias (above), so the gate is less conservative
+  than designed. This is the main reason it fails.
+- Synthetic AR(1) alpha and slice-1 costs only; 20 seeds, and the slice-6 vs slice-7 G252 contrast shows how
+  much seed sets can move these tests.
 
 ## Slice 6 (2026-11-06): an alpha that dies, train-chosen equal risk, clustered trial count
 
