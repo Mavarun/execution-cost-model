@@ -115,9 +115,11 @@ class CusumGateParams:
     arl0: float = 2520.0  # target bars between false "off" alarms while the alpha is alive
     ref_bars: int = 1260  # shadow bars before ``start`` used for the alive mean and sd
     h: float | None = None  # fixed alarm level; None derives it from ``arl0`` (``siegmund_h``)
+    shrink: float = 1.0  # alive level used = shrink x the reference mean (slice 8; 1.0 = slice 7)
 
     def label(self) -> str:
-        return f"C{self.h:g}" if self.h is not None else f"CARL{self.arl0:g}"
+        base = f"C{self.h:g}" if self.h is not None else f"CARL{self.arl0:g}"
+        return base if self.shrink == 1.0 else f"{base}s{self.shrink:g}"
 
 
 def siegmund_arl(h: float, delta: float) -> float:
@@ -156,13 +158,20 @@ def cusum_gate_states(shadow: np.ndarray, start: int, gate: CusumGateParams) -> 
     weeks, so h has to come from the ARL target, not a textbook constant. The gate turns off when
     the off-sum exceeds h and back on when the on-sum does; each switch resets both sums. State at
     bar ``t`` uses shadow bars before ``t``. If the reference mean is not positive the gate stays on.
+
+    ``gate.shrink`` scales the alive level to ``shrink * mu`` before anything else (slice 8). The
+    reference bars are the first fold's in-sample net, which overstates the OOS level; shrinking
+    it moves both the midpoint ``m`` and the drift the alarm level is solved for, so the ARL target
+    holds at the level the alpha actually earns, at the cost of a slower reaction to a decay.
     """
     if gate.ref_bars < 20 or (gate.h is not None and gate.h <= 0):
         raise ValueError("need ref_bars >= 20 and h > 0 when given")
+    if not 0.0 < gate.shrink <= 1.0:
+        raise ValueError("need 0 < shrink <= 1")
     if start < gate.ref_bars:
         raise ValueError("need ref_bars bars of shadow history before start")
     ref = shadow[start - gate.ref_bars:start]
-    mu, sd = float(ref.mean()), float(ref.std(ddof=1))
+    mu, sd = gate.shrink * float(ref.mean()), float(ref.std(ddof=1))
     n = shadow.size - start
     if mu <= 0 or sd <= 0:
         return np.ones(n)
