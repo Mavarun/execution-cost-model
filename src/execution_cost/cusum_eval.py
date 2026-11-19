@@ -330,3 +330,31 @@ def run_reentry_study(seeds=None) -> dict:
     h13 = bool(t["decay_post_bps"]["p"] < p["alpha_level"] and t["decay_post_bps"]["mean"] > 0)
     return {"seeds": list(seeds), "means": means, "tests": tests, "H12": h12, "H13": h13,
             "recommend": bool(h12 and h13)}
+
+
+def decay_reentries(on_frac: float, seeds=None, market: str = "decay") -> dict:
+    """Post-hoc slice-9 reading (decides nothing): what the gate does after a real decay.
+
+    After the switch bar, counts re-entries (off -> on) per seed and the on-spells that follow
+    them; with a dead alpha every re-entry is a false one.
+    """
+    c, p = CUSUM_PROTOCOL["cusum"], REENTRY_PROTOCOL
+    seeds = tuple(seeds if seeds is not None else p["seeds"])
+    reent, spells, bars = 0, [], 0
+    for s in seeds:
+        path, sw, costs, runs, wf = _wf_for(s, market)
+        on = cusum_gate_states(shadow_record(wf, runs), wf.fold_starts[0],
+                               CusumGateParams(arl0=c["arl0"], ref_bars=c["ref_bars"], shrink=p["shrink"], on_frac=on_frac))
+        post = on[wf.oos_index >= sw]
+        d = np.diff(np.r_[post[:1], post, 0.0])
+        ups, downs = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+        reent += ups.size
+        # on-spells that start with a re-entry: each up is followed by the next down
+        for u in ups:
+            nxt = downs[downs >= u]
+            spells.append(int(nxt[0] - u) if nxt.size else int(post.size - u))
+        bars += post.size
+    spells = np.array(spells, dtype=float)
+    return {"reentries": int(reent), "per_seed": reent / len(seeds),
+            "median_on_spell": float(np.median(spells)) if spells.size else 0.0,
+            "mean_on_spell": float(spells.mean()) if spells.size else 0.0, "post_bars": int(bars)}
