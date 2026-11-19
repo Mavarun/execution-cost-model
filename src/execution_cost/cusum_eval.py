@@ -247,3 +247,86 @@ def control_off_spells(shrink: float, seeds=None) -> dict:
     return {"alarms": int(alarms), "bars_per_alarm": float(bars / alarms) if alarms else float("inf"),
             "median_off_spell": float(np.median(spells)) if spells.size else 0.0,
             "mean_off_spell": float(spells.mean()) if spells.size else 0.0, "share_off": float(spells.sum() / bars)}
+
+
+# --------------------------------------------------------------------------------------------
+# Slice 9 (frozen 2026-11-20, before any of its seeds was run).
+#
+# Slice 8's post-hoc reading (``control_off_spells``) split the control cost into false alarms,
+# already near target after shrinking (one per ~2,000 OOS bars), and off-spells of ~500 bars,
+# because switching back on needs the full level h while the on-sum climbs only slowly. Slice 9
+# changes exactly one thing on top of slice 8's gate: the re-entry level is 0.25 x h
+# (``CusumGateParams.on_frac``). 0.25 is fixed a priori from that reading: the on-sum climbs
+# roughly linearly, so spells should shrink about 4x, and slice 8's 25% off share times 0.25 is
+# about 6%, inside the budget with room for the extra alarms that earlier re-entry allows. Not
+# tuned on any seed. Seeds 1100-1119 are disjoint from every earlier protocol.
+#
+# * H12: CUSUM-SR (shrink 0.75, on_frac 0.25) costs less than 0.10 OOS net Sharpe vs ungated on
+#   the no-break control (point estimate, as in slices 7 and 8).
+# * H13: CUSUM-SR beats ungated on post-decay net bps/day, one-sided paired t at 5%.
+# * Recommended (the gate's default turns on) only if both pass. The flip market and slice 8's
+#   CUSUM-S are reported alongside and decide nothing.
+# --------------------------------------------------------------------------------------------
+REENTRY_PROTOCOL = {
+    "shrink": 0.75,
+    "on_frac": 0.25,
+    "seeds": tuple(range(1100, 1120)),
+    "alpha_level": 0.05,
+    "max_control_sharpe_loss": 0.10,
+}
+REENTRY_ARMS = ("ungated", "CUSUM-S", "CUSUM-SR")
+
+
+def _wf_for(seed: int, market: str):
+    path, sw = _path(seed, market, None, None)
+    costs = cost_params()
+    rules = candidate_rules()[CUSUM_PROTOCOL["selector"]]
+    runs = run_rules(path, rules, costs)
+    wf = walk_forward(path, rules, costs, min_train=PROTOCOL["min_train"], test_len=PROTOCOL["test_len"], runs=runs)
+    return path, sw, costs, runs, wf
+
+
+def reentry_seed(seed: int, market: str = "decay") -> dict:
+    path, sw, costs, runs, wf = _wf_for(seed, market)
+    post = wf.oos_index >= sw
+    sh, s0 = shadow_record(wf, runs), wf.fold_starts[0]
+    c, p = CUSUM_PROTOCOL["cusum"], REENTRY_PROTOCOL
+    res = {"ungated": (wf.net, np.ones(post.size))}
+    for arm, on_frac in (("CUSUM-S", 1.0), ("CUSUM-SR", p["on_frac"])):
+        gp = CusumGateParams(arl0=c["arl0"], ref_bars=c["ref_bars"], shrink=p["shrink"], on_frac=on_frac)
+        on = cusum_gate_states(sh, s0, gp)
+        res[arm] = (gated_walk_forward_states(path, wf, runs, costs, on).net, on)
+    out = {}
+    for arm, (net, state) in res.items():
+        off_post = np.flatnonzero(state[post] == 0.0)
+        switches = int(np.abs(np.diff(state)).sum())
+        out[arm] = {"post_bps": float(net[post].mean() * 1e4), "oos_sharpe": annualized_sharpe(net),
+                    "share_on_pre": float(state[~post].mean()), "share_on_post": float(state[post].mean()),
+                    "switches": switches,
+                    "first_off_after_switch": int(off_post[0]) if off_post.size else None}
+    return out
+
+
+def run_reentry_study(seeds=None) -> dict:
+    p = REENTRY_PROTOCOL
+    seeds = tuple(seeds if seeds is not None else p["seeds"])
+    markets = tuple(CUSUM_PROTOCOL["markets"])
+    rows = {m: [reentry_seed(s, m) for s in seeds] for m in markets}
+
+    def arr(m, arm, key):
+        return np.array([r[arm][key] for r in rows[m]], dtype=float)
+
+    keys = ("post_bps", "oos_sharpe", "share_on_pre", "share_on_post", "switches")
+    means = {m: {a: {k: float(np.mean(arr(m, a, k))) for k in keys} for a in REENTRY_ARMS} for m in markets}
+    tests = {arm: {"decay_post_bps": paired_seed_test(arr("decay", arm, "post_bps"), arr("decay", "ungated", "post_bps"),
+                                                      alternative="greater"),
+                   "flip_post_bps": paired_seed_test(arr("flip", arm, "post_bps"), arr("flip", "ungated", "post_bps"),
+                                                     alternative="greater"),
+                   "control_sharpe": paired_seed_test(arr("control", arm, "oos_sharpe"),
+                                                      arr("control", "ungated", "oos_sharpe"))}
+             for arm in ("CUSUM-S", "CUSUM-SR")}
+    t = tests["CUSUM-SR"]
+    h12 = bool(t["control_sharpe"]["mean"] > -p["max_control_sharpe_loss"])
+    h13 = bool(t["decay_post_bps"]["p"] < p["alpha_level"] and t["decay_post_bps"]["mean"] > 0)
+    return {"seeds": list(seeds), "means": means, "tests": tests, "H12": h12, "H13": h13,
+            "recommend": bool(h12 and h13)}
