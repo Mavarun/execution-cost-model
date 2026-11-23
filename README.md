@@ -54,6 +54,7 @@ python scripts/run_vol_target_slice.py              # slice 6 H7: train-chosen v
 python scripts/run_clustered_dsr.py                 # slice 6: clustered trial count for the deflated Sharpe (~5 s)
 python scripts/run_cusum_slice.py                   # slice 7: CUSUM gate under an IC decay and flip (~2 s)
 python scripts/run_shrunk_cusum.py                  # slice 8: CUSUM with a shrunk in-sample reference (~2 s)
+python scripts/run_offcap_cusum.py                  # slice 11: shrunk CUSUM with an off-spell cap (~3 s)
 ```
 
 ## Layout
@@ -142,6 +143,53 @@ Reading:
 - POV is idealised: it sees current-interval volume without lag. *(Slice 3 adds an implementable lag-1 POV.)*
 - Single stock, single day horizon, constant intraday vol, no intraday vol smile, no cross-impact.
 - The first-slice limits still apply to the portfolio-level Sharpe analysis (full-sample stats, synthetic factor).
+
+## Slice 11 (2026-11-24): an off-spell cap fixes the control cost but loses the decay protection
+
+Slice 10 recommended CUSUM-S0.75 on a point estimate whose 95% CI (0.060-0.133) straddles the 0.10 budget, and named
+its weakness: a budget rule should bound the CI, not the mean. Its control cost comes from false off-spells of a
+median 440 bars. Slice 9 shortened them by lowering the re-entry level and lost the decay protection. Slice 11 caps
+an off-spell instead: `CusumGateParams.max_off` = 126 (about a quarter of the median spell, fixed a priori). After
+126 bars off, the gate switches on with both sums reset and has to re-detect at the full h, so the bar for switching
+on on evidence never drops. Frozen in `cusum_eval.OFFCAP_PROTOCOL` before fresh seeds 1300-1359 ran:
+
+- **H16:** the capped gate's control cost, as the upper end of its 95% CI, is below 0.10 Sharpe.
+- **H17:** it beats ungated on post-decay net bps/day (one-sided paired t, 5%).
+- **H18** (reported): it keeps at least half the uncapped gate's post-decay gain on the same seeds.
+- Recommended over CUSUM-S0.75 only if H16 and H17 pass. Dev runs on seeds 1-5 passed both, so the
+  **expectation** was H16 and H17 pass (H17 narrowly).
+
+Run: `python scripts/run_offcap_cusum.py` (~3 s; `artifacts/offcap_cusum.md`).
+
+| arm | decay: post bps/day | decay: on post | flip: post bps/day | control: OOS net Sharpe | control: on after bar 2,520 | control: switches |
+|---|---|---|---|---|---|---|
+| ungated WF-PARTIAL | -0.481 | 1.000 | -1.679 | 0.958 | 1.000 | 0.0 |
+| CUSUM-S0.75 (slice 8/10) | -0.197 | 0.264 | -0.296 | 0.873 | 0.815 | 1.9 |
+| CUSUM-S0.75-C126 | -0.419 | 0.839 | -1.305 | 0.935 | 0.958 | 2.4 |
+
+| gate - ungated | decay post bps/day (one-sided) | flip post bps/day (one-sided) | control OOS Sharpe | control cost 95% CI |
+|---|---|---|---|---|
+| CUSUM-S0.75 (slice 8/10) | +0.283 ± 0.095 (p = 0.002, 37/60) | +1.383 ± 0.124 (p = 0.000, 56/60) | -0.085 ± 0.015 (p = 0.000, 2/60) | [0.054, 0.115] |
+| CUSUM-S0.75-C126 | +0.061 ± 0.043 (p = 0.081, 33/60) | +0.374 ± 0.059 (p = 0.000, 49/60) | -0.023 ± 0.008 (p = 0.007, 14/60) | [0.007, 0.039] |
+
+**H16 passes, H17 and H18 fail; the cap is not recommended.** The control cost falls to 0.023 Sharpe (CI 0.007-0.039),
+but the post-decay gain is +0.061 bps/day (p = 0.081, 33/60), about a fifth of the uncapped gate's +0.283. The
+expectation was wrong on H17: five dev seeds were too few. On these seeds the uncapped CUSUM-S0.75 also misses a
+CI-bounded budget (CI 0.054-0.115), so under slice 11's stricter rule no gate tested so far is recommended. The package
+default (no gate) is unchanged.
+
+### Post-hoc reading (decides nothing; `cusum_eval.capped_redetection`)
+
+- **The cap trades one failure for the other, like slice 9.** After a real decay the capped gate re-enters 3.17 times
+  per seed (0.68 uncapped), and each false on-spell lasts a median 428 bars before the full-h CUSUM fires again. With
+  126 bars off for every ~430 on, it is on 84% of post-decay bars. The same re-detection delay that makes false
+  off-spells long makes false on-spells long.
+- So neither a lower re-entry level nor a cap can fix both: the CUSUM's detection delay at an ARL of 2,520 bars is the
+  binding constraint. A faster detector of the decay itself, not a re-entry rule, is what would need to change.
+
+### Weaknesses
+
+- One cap (126), the same synthetic AR(1) alpha and one break shape at a known bar.
 
 ## Slice 10 (2026-11-20): the shrunk gate on 60 fresh seeds passes, narrowly
 
