@@ -493,3 +493,28 @@ def run_offcap_study(seeds=None) -> dict:
     h18 = bool(t["decay_post_bps"]["mean"] >= 0.5 * tests["CUSUM-S"]["decay_post_bps"]["mean"])
     return {"seeds": list(seeds), "means": means, "tests": tests, "control_cost_ci": cis,
             "H16": h16, "H17": h17, "H18": h18, "recommend": bool(h16 and h17)}
+
+
+def capped_redetection(seeds=None, market: str = "decay") -> dict:
+    """Post-hoc slice-11 reading (decides nothing): after a real decay, each cap re-entry is a false
+    on-spell that lasts until the CUSUM re-detects at full h. Reports re-entries per seed and the
+    median / mean on-spell after them, for the capped gate."""
+    c, p = CUSUM_PROTOCOL["cusum"], OFFCAP_PROTOCOL
+    seeds = tuple(seeds if seeds is not None else p["seeds"])
+    reent, spells = 0, []
+    for s in seeds:
+        path, sw, costs, runs, wf = _wf_for(s, market)
+        on = cusum_gate_states(shadow_record(wf, runs), wf.fold_starts[0],
+                               CusumGateParams(arl0=c["arl0"], ref_bars=c["ref_bars"], shrink=p["shrink"],
+                                               max_off=p["max_off"]))
+        post = on[wf.oos_index >= sw]
+        d = np.diff(np.r_[post[:1], post, 0.0])
+        ups, downs = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+        reent += ups.size
+        for u in ups:
+            nxt = downs[downs >= u]
+            spells.append(int(nxt[0] - u) if nxt.size else int(post.size - u))
+    spells = np.array(spells, dtype=float)
+    return {"reentries": int(reent), "per_seed": reent / len(seeds),
+            "median_on_spell": float(np.median(spells)) if spells.size else 0.0,
+            "share_on_spell_over_500": float((spells > 500).mean()) if spells.size else 0.0}
