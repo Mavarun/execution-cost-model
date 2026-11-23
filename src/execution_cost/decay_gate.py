@@ -117,11 +117,13 @@ class CusumGateParams:
     h: float | None = None  # fixed alarm level; None derives it from ``arl0`` (``siegmund_h``)
     shrink: float = 1.0  # alive level used = shrink x the reference mean (slice 8; 1.0 = slice 7)
     on_frac: float = 1.0  # re-entry level = on_frac x h (slice 9; 1.0 = the symmetric slice 7/8 gate)
+    max_off: int | None = None  # slice 11: after this many bars off, switch back on and re-check (None = never)
 
     def label(self) -> str:
         base = f"C{self.h:g}" if self.h is not None else f"CARL{self.arl0:g}"
         base = base if self.shrink == 1.0 else f"{base}s{self.shrink:g}"
-        return base if self.on_frac == 1.0 else f"{base}r{self.on_frac:g}"
+        base = base if self.on_frac == 1.0 else f"{base}r{self.on_frac:g}"
+        return base if self.max_off is None else f"{base}c{self.max_off}"
 
 
 def siegmund_arl(h: float, delta: float) -> float:
@@ -170,6 +172,11 @@ def cusum_gate_states(shadow: np.ndarray, start: int, gate: CusumGateParams) -> 
     the full alarm level to switch back on, so one false alarm keeps it off for hundreds of bars
     (slice 8's post-hoc reading); a lower level re-enters sooner, at the price of re-entering
     falsely more often after a real decay.
+
+    ``gate.max_off`` (slice 11) caps an off-spell: after ``max_off`` bars off, the gate switches
+    back on with both sums reset, so it has to re-detect a decay at the full level ``h``. Unlike a
+    lower ``on_frac`` it never lowers the bar for switching on on evidence; it only limits how long
+    one false alarm can keep the book flat.
     """
     if gate.ref_bars < 20 or (gate.h is not None and gate.h <= 0):
         raise ValueError("need ref_bars >= 20 and h > 0 when given")
@@ -177,6 +184,8 @@ def cusum_gate_states(shadow: np.ndarray, start: int, gate: CusumGateParams) -> 
         raise ValueError("need 0 < shrink <= 1")
     if not 0.0 < gate.on_frac <= 1.0:
         raise ValueError("need 0 < on_frac <= 1")
+    if gate.max_off is not None and gate.max_off < 1:
+        raise ValueError("need max_off >= 1 when given")
     if start < gate.ref_bars:
         raise ValueError("need ref_bars bars of shadow history before start")
     ref = shadow[start - gate.ref_bars:start]
@@ -187,15 +196,16 @@ def cusum_gate_states(shadow: np.ndarray, start: int, gate: CusumGateParams) -> 
     m = 0.5 * mu
     h = gate.h if gate.h is not None else siegmund_h(m / sd, gate.arl0)
     on = np.empty(n)
-    state, s_off, s_on = 1.0, 0.0, 0.0
+    state, s_off, s_on, off_for = 1.0, 0.0, 0.0, 0
     for i in range(n):
         on[i] = state
         x = shadow[start + i]  # observed after the decision for bar start + i
         s_off = max(0.0, s_off + (m - x) / sd)
         s_on = max(0.0, s_on + (x - m) / sd)
+        off_for = off_for + 1 if state == 0.0 else 0
         if state == 1.0 and s_off > h:
             state, s_off, s_on = 0.0, 0.0, 0.0
-        elif state == 0.0 and s_on > gate.on_frac * h:
+        elif state == 0.0 and (s_on > gate.on_frac * h or (gate.max_off is not None and off_for >= gate.max_off)):
             state, s_off, s_on = 1.0, 0.0, 0.0
     return on
 
