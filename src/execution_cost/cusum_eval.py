@@ -414,3 +414,82 @@ def control_cost_by_seed_set() -> dict:
                         for k, v in diffs.items()},
             "pooled": {"cost": float(-allv.mean()), "se": float(allv.std(ddof=1) / np.sqrt(allv.size)), "n": int(allv.size)},
             "anova_p": float(stats.f_oneway(*diffs.values()).pvalue)}
+
+
+# --------------------------------------------------------------------------------------------
+# Slice 11 (frozen 2026-11-24, before any of its seeds was run).
+#
+# Slice 10 recommended CUSUM-S0.75 on a point estimate (0.096 Sharpe control cost) whose 95% CI
+# (0.060-0.133) straddles the 0.10 budget, and the 100-seed pooled cost is 0.102. Its cost comes
+# from false off-spells of a median 440 bars (slice 10 post-hoc). Slice 9 showed that lowering the
+# re-entry level shortens them but gives up the decay protection. Slice 11 caps an off-spell
+# instead (``CusumGateParams.max_off`` = 126 bars, about a quarter of the median spell, fixed a
+# priori): after 126 bars off the gate switches on and must re-detect at the full h.
+#
+# * H16: CUSUM-S0.75-C126's control cost, as the *upper* end of its 95% CI, is below 0.10 Sharpe
+#   (slice 10's weakness: bound the CI, not the mean).
+# * H17: CUSUM-S0.75-C126 beats ungated on post-decay net bps/day, one-sided paired t at 5%.
+# * H18 (reported, decides nothing alone): its post-decay gain is at least half of CUSUM-S0.75's on
+#   the same seeds.
+# * Recommended over CUSUM-S0.75 only if H16 and H17 pass. Defaults do not change either way.
+#
+# Seeds 1300-1359 (60, fresh). Dev check (never used for a decision): on a synthetic alive-then-dead
+# shadow (seeds 1-5, tests/test_cusum_offspell_cap.py) the cap cuts the off share after the death
+# from 0.46 to 0.11 on average; on the real pipeline with dev seeds 1-5, CUSUM-S0.75-C126's control
+# cost CI was [-0.020, 0.082] and its post-decay gain +0.196 bps/day (p 0.042, 4/5), against +0.323
+# for the uncapped gate. Expectation: H16 passes; H17 passes narrowly; H18 passes.
+# --------------------------------------------------------------------------------------------
+OFFCAP_PROTOCOL = {
+    "shrink": 0.75,
+    "max_off": 126,
+    "seeds": tuple(range(1300, 1360)),
+    "alpha_level": 0.05,
+    "max_control_sharpe_loss": 0.10,
+}
+OFFCAP_ARMS = ("ungated", "CUSUM-S", "CUSUM-SC")
+
+
+def offcap_seed(seed: int, market: str = "decay") -> dict:
+    path, sw, costs, runs, wf = _wf_for(seed, market)
+    post = wf.oos_index >= sw
+    sh, s0 = shadow_record(wf, runs), wf.fold_starts[0]
+    c, p = CUSUM_PROTOCOL["cusum"], OFFCAP_PROTOCOL
+    res = {"ungated": (wf.net, np.ones(post.size))}
+    for arm, cap in (("CUSUM-S", None), ("CUSUM-SC", p["max_off"])):
+        gp = CusumGateParams(arl0=c["arl0"], ref_bars=c["ref_bars"], shrink=p["shrink"], max_off=cap)
+        on = cusum_gate_states(sh, s0, gp)
+        res[arm] = (gated_walk_forward_states(path, wf, runs, costs, on).net, on)
+    out = {}
+    for arm, (net, state) in res.items():
+        out[arm] = {"post_bps": float(net[post].mean() * 1e4), "oos_sharpe": annualized_sharpe(net),
+                    "share_on_pre": float(state[~post].mean()), "share_on_post": float(state[post].mean()),
+                    "switches": int(np.abs(np.diff(state)).sum())}
+    return out
+
+
+def run_offcap_study(seeds=None) -> dict:
+    p = OFFCAP_PROTOCOL
+    seeds = tuple(seeds if seeds is not None else p["seeds"])
+    markets = tuple(CUSUM_PROTOCOL["markets"])
+    rows = {m: [offcap_seed(s, m) for s in seeds] for m in markets}
+
+    def arr(m, arm, key):
+        return np.array([r[arm][key] for r in rows[m]], dtype=float)
+
+    keys = ("post_bps", "oos_sharpe", "share_on_pre", "share_on_post", "switches")
+    means = {m: {a: {k: float(np.mean(arr(m, a, k))) for k in keys} for a in OFFCAP_ARMS} for m in markets}
+    tests = {arm: {"decay_post_bps": paired_seed_test(arr("decay", arm, "post_bps"), arr("decay", "ungated", "post_bps"),
+                                                      alternative="greater"),
+                   "flip_post_bps": paired_seed_test(arr("flip", arm, "post_bps"), arr("flip", "ungated", "post_bps"),
+                                                     alternative="greater"),
+                   "control_sharpe": paired_seed_test(arr("control", arm, "oos_sharpe"),
+                                                      arr("control", "ungated", "oos_sharpe"))}
+             for arm in ("CUSUM-S", "CUSUM-SC")}
+    cis = {arm: [float(-(t["control_sharpe"]["mean"] + 1.96 * t["control_sharpe"]["se"])),
+                 float(-(t["control_sharpe"]["mean"] - 1.96 * t["control_sharpe"]["se"]))] for arm, t in tests.items()}
+    t = tests["CUSUM-SC"]
+    h16 = bool(cis["CUSUM-SC"][1] < p["max_control_sharpe_loss"])
+    h17 = bool(t["decay_post_bps"]["p"] < p["alpha_level"] and t["decay_post_bps"]["mean"] > 0)
+    h18 = bool(t["decay_post_bps"]["mean"] >= 0.5 * tests["CUSUM-S"]["decay_post_bps"]["mean"])
+    return {"seeds": list(seeds), "means": means, "tests": tests, "control_cost_ci": cis,
+            "H16": h16, "H17": h17, "H18": h18, "recommend": bool(h16 and h17)}
